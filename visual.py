@@ -108,11 +108,12 @@ def annotate(image, detection, centers, bbox=None):
     :param image: 输入图像，通常是彩色图像（BGR格式）
     :param detection: 包含检测到的标记信息的字典，包含标记角点和ID
     :param centers: 标记中心点的列表或单个中心点的元组
-    :param bbox: 可选的边界框，格式为 (x0, y0, x1, y1)
+    :param bbox: 可选的边界框列表，格式为 [(x0, y0, x1, y1), ...]
     :return: 带有注释的图像
     :type image: np.ndarray
     :rtype: np.ndarray
     """
+
     aruco = cv2.aruco
     annotated = image.copy()
 
@@ -158,7 +159,8 @@ def annotate(image, detection, centers, bbox=None):
             cv2.LINE_AA
         )
         if bbox is not None:
-            cv2.rectangle(annotated, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+            for (x0, y0, x1, y1) in bbox:
+                cv2.rectangle(annotated, (x0, y0), (x1, y1), (0, 255, 0), 2)
 
     return annotated
 
@@ -168,16 +170,22 @@ def _homography_reproj_error(H, obj_pts, img_pts):
     err = np.linalg.norm(proj - img_pts.reshape(-1,2), axis=1)
     return float(np.mean(err))
 
-def solve_board_center_bbox_from_two_markers(image, corners_dict, ids_pair, marker_length, separation,
+def solve_board_center_bbox_from_two_markers(image, single_record, ids_pair, marker_length, separation,
                                              ransac_thresh=3.0, padding=0):
     """
     intro:识别corners dict的两个id组成的板子的外接框
-    corners_dict: {id: (1,4,2) numpy} 仅包含你关心的两个 id 的角点
+    single_record, [dict[int]:list[4]=[tuple(x,y)*4]], 一块板子上的id与角点坐标映射
     ids_pair: (idA, idB) 两个标记的ID
     marker_length: L，单个marker边长（同单位）
     separation: sep，标记之间的缝隙宽度（同单位）
     返回: center(x,y), bbox(x0,y0,x1,y1) 或 (None, None)
     """
+    corners_dict = {}
+    for mid in ids_pair:
+        pts = single_record.get(mid, [])
+        if pts:
+            corners_dict[mid] = np.array(pts, dtype=np.float32).reshape(1, 4, 2)
+
     L = float(marker_length); sep = float(separation)
     idA, idB = int(ids_pair[0]), int(ids_pair[1])
     if idA not in corners_dict or idB not in corners_dict:
@@ -188,21 +196,22 @@ def solve_board_center_bbox_from_two_markers(image, corners_dict, ids_pair, mark
 
     # 2×2 棋盘四种候选布局（A 和 B 分别落在对角的两个格子）
     # 棋盘平面坐标系：原点在左上角，X向右，Y向下
-    # 每个格子的大小是 L，两个格子之间的缝隙是 sep
-    W = 2*L + sep
+    # 每个格子的大小是 L，两个格子之间的缝隙是 sep，marker比棋盘边缘内缩 sep/2
+    W = 2*L + 2*sep
     Hh = W
 
     layouts = [
         # A 在左上(0,0)，B 在右下(L+sep, L+sep)
-        ((0,0), (L+sep, L+sep)),
+        ((sep/2,sep/2), (L+3*sep/2, L+3*sep/2)),
         # A 在右上(L+sep,0)，B 在左下(0, L+sep)
-        ((L+sep,0), (0, L+sep)),
+        ((L+3*sep/2,sep/2), (sep/2, L+3*sep/2)),
         # A 在左下(0,L+sep)，B 在右上(L+sep,0)
-        ((0, L+sep), (L+sep,0)),
+        ((sep/2, L+3*sep/2), (L+3*sep/2,sep/2)),
         # A 在右下(L+sep,L+sep)，B 在左上(0,0)
-        ((L+sep, L+sep), (0,0)),
+        ((L+3*sep/2, L+3*sep/2), (sep/2,sep/2)),
     ]
 
+    # RANSAC 估计单应矩阵，分析当前布局
     best = None
     for (Ax, Ay), (Bx, By) in layouts:
         # OpenCV角点顺序: tl, tr, br, bl
@@ -328,8 +337,8 @@ def main():
         "boardB_394_395": [394, 395],
     }
     target_ids = [392,393,394,395]
-    L = 10
-    sep = 5
+    L = 8
+    sep = 3
 
     if args.image:
         image = cv2.imread(args.image)
@@ -346,25 +355,25 @@ def main():
             dictionary_name=args.dictionary,
         )
 
-    corners_dict = {}
-    for mid in (394, 395):
-        pts = records.get(mid, [])
-        if pts:
-            corners_dict[mid] = np.array(pts, dtype=np.float32).reshape(1, 4, 2)
-    newcenter, bbox = solve_board_center_bbox_from_two_markers(image, corners_dict, (394, 395), L, sep)
+    newcenter1, bbox1 = solve_board_center_bbox_from_two_markers(image, records, (392, 393), L, sep)
+    newcenter2, bbox2 = solve_board_center_bbox_from_two_markers(image, records, (394, 395), L, sep)
 
     if not centers:
         print("No target boards detected.")
     else:
         for idx, (name, (cx, cy)) in enumerate(centers.items()):
             print(f"{idx} {name} center x={cx:.3f} y={cy:.3f}")
-    print(newcenter, bbox)
+    if newcenter1:
+        print(newcenter1, bbox1)
+    if newcenter2:
+        print(newcenter2, bbox2)
     if args.show:
         # 只画中心点：传 centers.values() 即可（不会有 None）
         center_list = list(centers.values())
-        annotated = annotate(image, detection, center_list, bbox)
+        bboxes = [b for b in (bbox1, bbox2) if b is not None]
+        annotated = annotate(image, detection, center_list, bboxes if bboxes else None)
         cv2.imshow("ArUco board centers", annotated)
-        cv2.waitKey(10000)
+        cv2.waitKey(2000)
         cv2.destroyAllWindows()
 
 

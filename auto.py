@@ -2,6 +2,8 @@ import logging
 import re
 import time
 import ctypes
+import numpy as np
+import cv2
 from ctypes import wintypes
 #from curses.textpad import rectangle
 from pathlib import Path
@@ -11,10 +13,11 @@ from pathlib import Path
 from typing import Iterable
 
 import pywinauto.mouse
+from PIL import ImageGrab
 from pywinauto import Application, timings, mouse
 from pywinauto.findwindows import ElementNotFoundError
 from pywinauto.keyboard import send_keys
-from visual import get_board_centers_from_screen
+from visual import get_board_centers_from_screen, solve_board_center_bbox_from_two_markers
 
 ROOT_STR = r"C:\Users\ZN191014\Desktop\新建文件夹 (2)"
 POINTCLOUD_ROOT = Path(ROOT_STR)
@@ -32,19 +35,21 @@ WAIT_MAIN_WINDOW = 20
 WAIT_DIALOG = 15
 WAIT_ACTION = 5
 FOLDER_REGEX = re.compile(r"^\d{4}$")
+L = 10 #标记宽度
+sep = 5 #标记间缝隙宽度
 
 
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 def list_pending_folders(root: Path, marker_root: Path) -> Iterable[Path]:
-    # processed = set()
-    # if marker_root.exists():
-    #     for item in marker_root.iterdir():
-    #         if item.is_dir():
-    #             base_name = item.name.rstrip("-")
-    #             if FOLDER_REGEX.fullmatch(base_name):
-    #                 processed.add(base_name)
+    processed = set()
+    if marker_root.exists():
+        for item in marker_root.iterdir():
+            if item.is_dir():
+                base_name = item.name.rstrip("-")
+                if FOLDER_REGEX.fullmatch(base_name):
+                    processed.add(base_name)
 
     today = datetime.now().date()
     candidates = [
@@ -56,11 +61,11 @@ def list_pending_folders(root: Path, marker_root: Path) -> Iterable[Path]:
 
     for folder in candidates:
         modified_date = datetime.fromtimestamp(folder.stat().st_mtime).date()
-        # if modified_date != today:
-        #     continue
+        if modified_date != today:
+            continue
         yield folder
-        # if folder.name not in processed:
-        #     yield folder
+        if folder.name not in processed:
+            yield folder
 
 
 def start_or_connect_app() -> Application:
@@ -81,7 +86,7 @@ def ensure_main_window(app: Application):
     window = app.window(title=MAIN_WINDOW_TITLE)
     window.wait("ready", timeout=WAIT_MAIN_WINDOW)
     window.set_focus()
-    # print(window.print_ctrl_ids())
+    #print(window.print_ctrl_ids())
     return window
 
 # def get_ctrl_position(window,
@@ -177,7 +182,7 @@ def click_button(
             last_exc = exc
 
     logging.error("未找到控件: title=%s regex=%s type=%s", raw_title or (pattern.pattern if pattern else None), bool(pattern), button_type)
-    # window.print_ctrl_ids()
+    #window.print_ctrl_ids()
     if last_exc:
         raise last_exc
     raise ElementNotFoundError("未找到匹配控件")
@@ -205,6 +210,36 @@ def scroll_delay(center: tuple[int, int], wheel_dist: int=1, mouse: object=pywin
         else:
             break
 
+def click_view_for_task(window, task_name, timeout=5, title="查看"):
+    # 1) 定位这一行里“任务名称”的 DataItem
+    task_item = window.child_window(title=task_name, control_type="DataItem")
+    task_item.wait("exists enabled visible", timeout=timeout)
+
+    # 2) 取父容器（同一行/同一组的容器）
+    row = task_item.parent()
+
+    # 3) 找同一父容器下的“查看 目录 原文件 删除”那格，再点里面的“查看”
+    try:
+        actions_cell = row.child_window(title_re=f"{title}", control_type="DataItem")
+        return actions_cell
+    except AttributeError:
+        actions_w = None
+        for di in row.descendants(control_type="DataItem"):
+            t = (di.window_text() or "").strip()
+            if t.startswith(title):   # 匹配 "查看 目录 原文件 删除"
+                actions_w = di
+                break
+        if actions_w is not None:
+            actions_spec = window.child_window(handle=actions_w.handle)
+
+            # 4) 在动作列里找真正可点击的 “查看”（可能是 Text / Static / Hyperlink / Button）
+            for ct in ("Text", "Static", "Hyperlink", "Button"):
+                for w in actions_w.descendants(control_type=ct):
+                    if (w.window_text() or "").strip() == title:
+                        return w
+        else:
+            return None
+        
 def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     # address_edit = None
     # dialog.print_ctrl_ids()
@@ -236,67 +271,155 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     # time.sleep(0.3)
     # click_button(dialog, SELECT_BUTTON_TEXT, timeout=WAIT_ACTION)
 
-def solve(window, app: Application, folder_name: str):
+def solve(window, app: Application, folder_name: str, button=None):
     """解算过程"""
 
     # 定义要是别的板子名字和板子含有的charuco id
+    target_ids = [392, 393, 394, 395]
     groups = {
-        "boardA_392_393": [392, 393],
-        "boardB_394_395": [394, 395],
+        "boardA_392_393": [target_ids[0],target_ids[1]],
+        "boardB_394_395": [target_ids[2],target_ids[3]],
     }
 
-    # 坐标转换
-    click_button(window, title="坐标转换")
-    click_button(window, title="请选择", button_type="Text")
-    send_keys("{DOWN}{ENTER}")
-    click_button(window, title="请选择", button_type="Button")
-    # 选择文件夹的子窗口
-    time.sleep(0.5)
-    dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
-    choose_folder(dialog,"after"+"{\}"+ folder_name + "{-}")
-    click_button(window, title="返回")
-    time.sleep(0.8)
+    # # 坐标转换
+    # while True:
+    #     try:
+    #         click_button(window, title="坐标转换")
+    #         break
+    #     except timings.TimeoutError:
+    #         button.click_input()
+    #         time.sleep(1)
+    # while True:
+    #     try:
+    #         click_button(window, title="请选择", button_type="Text")
+    #         break
+    #     except ElementNotFoundError:
+    #         time.sleep(0.5)
+    # send_keys("{DOWN}{ENTER}")
+    # click_button(window, title="请选择", button_type="Button")
+    # # 选择文件夹的子窗口
+    # time.sleep(0.5)
+    # dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
+    # choose_folder(dialog,"after"+"{\}"+ folder_name + "{-}")
+    # click_button(window, title="确认")
+    # time.sleep(0.8)
+    #
+    # while True:
+    #     try:
+    #         click_button(window, title="浏览")
+    #         break
+    #     except ElementNotFoundError:
+    #         time.sleep(0.5)
+    # time.sleep(6)
+
+    while True:
+        try:
+            click_button(window,title="处理中",click=False)
+            time.sleep(0.5)
+        except ElementNotFoundError:
+            break
 
     # 截图
+    time.sleep(0.5)
     point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
     pcp, pcp_loc = point_cloud_image
-    center = (int((pcp_loc["left"] + pcp_loc["right"])*(1/2)), int((pcp_loc["bottom"] + pcp_loc["top"])* (7/12)))
-    scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
-    centers, records, detection = get_board_centers_from_screen(groups=groups)
+    center = (int((pcp_loc["left"] + pcp_loc["right"])*(9/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
+    #scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
+    centers, records, image, detection = get_board_centers_from_screen(groups=groups)
+    corners_dict = {}
+    for mid in target_ids:
+        pts = records.get(mid, [])
+        if len(pts) == 2:
+            corners_dict[mid] = np.array(pts, dtype=np.float32).reshape(1, 4, 2)
+        else:
+            logging.warning("未检测到完整标记 ID=%d 的角点，跳过。", mid)
+    newcenter1, bbox1 = solve_board_center_bbox_from_two_markers(image, corners_dict, (392, 393), L, sep)
+    newcenter2, bbox2 = solve_board_center_bbox_from_two_markers(image, corners_dict, (394, 395), L, sep)
     time.sleep(0.5)
-
+    
+    img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
+    cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker.png", cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2BGR))
+    img2 = ImageGrab.grab(bbox=(bbox2[1], bbox2[0], bbox2[3], bbox2[2]))
+    cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker2.png", cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2BGR))
     #选点
-    click_button(window, title="真彩")
+    try:
+        click_button(window, title="真彩", click=False)
+    except ElementNotFoundError:
+        try:
+            click_button(window, title="高程", click=False)
+        except ElementNotFoundError:
+            pass
     click_button(window, title="强度")
     click_button(window, title="坐标")
 
+    if newcenter1 is not None:
+        cx, cy = newcenter1
+        mouse.click(button="left", coords=(int(cx), int(cy)))
+    if newcenter2 is not None:
+        cx, cy = newcenter2
+        mouse.click(button="left", coords=(int(cx), int(cy)))
+
+    # 导出坐标
+    click_button(window, title="导出坐标")
+    time.sleep(0.5)
+    click_button(window, title="导出", button_type="Button")
 
 
-
-
-
-def run_import_for_folder(app: Application, folder: Path) -> None:
-    logging.info("开始导入: %s", folder)
+def run_import_for_folder(app: Application, folders_list:list) -> None:
     window = ensure_main_window(app)
-    # click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
-    # #time.sleep(WAIT_ACTION)
-    # click_button(window, "选择文件夹", "Button", 2)
-    # dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
-    # choose_folder(dialog, folder.name, folder.parent.as_posix())
-    # click_button(window,title="RTK校准")
-    # click_button(window,title="确认")
-    # time.sleep(3.0)
-    # window = ensure_main_window(app)
+    # for folder in folders_list:
+    #     logging.info("开始导入: %s", folder)
+    #     click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
+    #     #time.sleep(WAIT_ACTION)
+    #     click_button(window, "选择文件夹", "Button", 2)
+    #     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
+    #     choose_folder(dialog, folder.name, folder.parent.as_posix())
+    #     click_button(window,title="RTK校准")
+    #     click_button(window,title="确认")
+    #     time.sleep(3.0)
+    #     window = ensure_main_window(app)
+    #     logging.info("导入完成: %s", folder)
+    #     time.sleep(0.2)
+    #
+    # time.sleep(1.0)
+    # logging.info("今天的点云全部导入完成")
 
-    solve(window, app, folder.stem)
-    click_button(window, RTK_BUTTON_TEXT)
-    try:
-        confirm = wait_dialog(app, CONFIRM_DIALOG_TITLE_RE, WAIT_DIALOG)
-        click_button(confirm, CONFIRM_BUTTON_TEXT)
-    except ElementNotFoundError:
-        logging.warning("未见确认对话框，继续。")
-    time.sleep(1.0)
-    logging.info("导入完成: %s", folder)
+
+    # while True:
+    #     try:
+    #         # task_view type: return folders_list[0].name ’s line eg: DataItem - '查看 目录 原文件 删除'
+    #         w = c.wrapper_object() if hasattr(c, "wrapper_object") else c
+    #         if bool(w) and w.is_visible() and w.is_enabled():
+    #             c.click_input()
+    #             break
+    #         continue
+    #     except TimeoutError:
+    #         pass
+    #time.sleep(10)
+    for folder in folders_list:
+        # 阻塞直到导入完成
+        #c = click_view_for_task(window, folder.name)
+        #solve(window, app, folder.stem, c)
+        solve(window, app, folder.stem)
+
+        # 将points.csv移动到after/csv目录下，并改名为对应{folder.stem}.csv
+        src_csv = Path(folder) / "points.csv"
+        dest_dir = POINTCLOUD_ROOT / "after" / "csv"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_csv = dest_dir / f"{folder.stem}.csv"
+        if src_csv.exists():
+            # rename 相当于移动文件和重命名
+            src_csv.rename(dest_csv)
+            logging.info("已移动并重命名坐标文件到: %s", dest_csv)
+        else:
+            logging.warning("未找到坐标文件: %s", src_csv)
+
+    # try:
+    #     confirm = wait_dialog(app, CONFIRM_DIALOG_TITLE_RE, WAIT_DIALOG)
+    #     click_button(confirm, CONFIRM_BUTTON_TEXT)
+    # except ElementNotFoundError:
+    #     logging.warning("未见确认对话框，继续。")
+
 
 
 def main() -> None:
@@ -306,13 +429,12 @@ def main() -> None:
         logging.info("没有待导入的四位数点云文件夹。")
         return
     app = start_or_connect_app()
-    for folder in pending:
-        try:
-            run_import_for_folder(app, folder)
-            time.sleep(2)
-        except Exception as exc:
-            logging.exception("处理 %s 时出现异常: %s", folder, exc)
-            break
+    try:
+        run_import_for_folder(app, pending)
+        time.sleep(2)
+    except Exception as exc:
+        logging.exception("处理 %s 时出现异常: %s", pending, exc)
+
 
 
 if __name__ == "__main__":
