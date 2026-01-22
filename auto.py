@@ -40,7 +40,7 @@ sep = 5 #标记间缝隙宽度
 
 
 def setup_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", filename="process.log",  encoding="utf-8",filemode="a")
 
 def list_pending_folders(root: Path, marker_root: Path) -> Iterable[Path]:
     processed = set()
@@ -320,6 +320,9 @@ def solve(window, app: Application, folder_name: str, button=None):
             break
 
     # 截图
+    # TODO: first click "俯视" to reset view
+    time.sleep(0.5)
+    click_button(window,title="俯视")
     time.sleep(0.5)
     point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
     pcp, pcp_loc = point_cloud_image

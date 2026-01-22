@@ -83,17 +83,74 @@ def detect_charuco(image, board, dictionary):
 
     return detection
 
+def simulate_pointcloud_sampling(
+    bgr: np.ndarray,
+    downscale: float = 0.6,     # 0~1，越小越“块状”
+    levels: int = 6,             # 灰度离散级数，越小越离散
+    dropout: float = 0.1,       # 0~1，丢点比例，越大越稀疏
+    blur_ksize: int = 3,         # 0 或奇数，比如 3/5
+    noise_sigma: float = 6.0,    # 噪声强度(像素)
+    jpeg_quality: int | None = 60,  # 1~100，越小压缩越狠；None=不做jpeg
+    seed: int | None = None,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+
+    img = bgr.copy()
+    h, w = img.shape[:2]
+
+    # 1) 降采样 + 最近邻放大（块状/锯齿）
+    if downscale is not None and 0 < downscale < 1:
+        sh = max(1, int(h * downscale))
+        sw = max(1, int(w * downscale))
+        small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+        img = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    # 2) 灰度 & 均衡（点云窗口常见）
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # 3) 离散化（levels 档）
+    if levels is not None and levels >= 2:
+        step = 255 // (levels - 1)
+        gray = (np.round(gray / step) * step).clip(0, 255).astype(np.uint8)
+
+    # 4) 稀疏化：随机丢像素（更像点云“缺点”）
+    if dropout is not None and 0 < dropout < 1:
+        mask_keep = rng.random(gray.shape) > dropout
+        gray = (gray * mask_keep.astype(np.uint8)).astype(np.uint8)
+
+    # 5) 模糊 + 噪声（轻微即可）
+    if blur_ksize and blur_ksize >= 3 and blur_ksize % 2 == 1:
+        gray = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0)
+
+    if noise_sigma and noise_sigma > 0:
+        noise = rng.normal(0, noise_sigma, size=gray.shape).astype(np.float32)
+        gray = np.clip(gray.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    # 6) JPEG 压缩伪影（可选）
+    if jpeg_quality is not None:
+        ok, enc = cv2.imencode(".jpg", gray, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+        if ok:
+            gray = cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE)
+
+    return gray
 
 def compute_center(points: np.ndarray):
     if points.size == 0:
         return (0.0, 0.0)
     return tuple(points.mean(axis=0).tolist())
 
-def detect_aruco_markers(image, dictionary):
+def detect_aruco_markers(image, dictionary, simulate_pointcloud: bool = False):
     aruco = cv2.aruco
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    gray_enh = clahe.apply(gray)
+    if simulate_pointcloud:
+        gray_enh = simulate_pointcloud_sampling(image,jpeg_quality=None)
+        cv2.imwrite("simulated_pointcloud.png", gray_enh)
+    else:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_enh = clahe.apply(gray)
+        cv2.imwrite("gray_enh.png", gray_enh)
     params = _build_detector_params()
     corners, ids, _ = aruco.detectMarkers(gray_enh, dictionary, parameters=params)
     if ids is None or len(ids) == 0:
@@ -287,7 +344,8 @@ def get_board_centers_from_image(
         }
 
     dictionary = get_dictionary(dictionary_name)
-    corners, ids = detect_aruco_markers(image, dictionary)
+    #corners, ids = detect_aruco_markers(image,dictionary)
+    corners, ids = detect_aruco_markers(image, dictionary, True)
     if ids is None:
         empty_detection = {
             "marker_corners": [],
