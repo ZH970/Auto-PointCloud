@@ -1,6 +1,9 @@
 import argparse
+import time
+
 import cv2
 import numpy as np
+from typing import Optional
 from PIL import ImageGrab
 
 
@@ -83,6 +86,177 @@ def detect_charuco(image, board, dictionary):
 
     return detection
 
+def detect_two_diagonal_filled_squares(
+    bgr: np.ndarray,
+    min_area_ratio: float = 0.005,   # 占整图面积比例，过滤小噪声
+    max_area_ratio: float = 0.8,     # 过滤几乎全屏的大块
+    aspect_tol: float = 0.18,        # 宽高比允许偏差（0.18≈ 1:1 ±18%）
+    fill_thresh: float = 0.90,       # “实心程度”：黑像素填充率阈值
+    diag_balance_tol: float = 0.6,   # |dx| 和 |dy| 的平衡程度（越小越严格）
+    morph_ksize: int = 5,            # 闭运算核，填补黑块里的小亮斑
+    debug_path: Optional[str] = None,
+):
+    """
+    识别两个对角线排列的黑色实心正方形。
+    返回: (center1, center2, outer_square_bbox) 或 None
+      - center1/2: (cx, cy) float
+      - outer_square_bbox: (x0, y0, x1, y1) int，最小外接“正方形”(轴对齐)
+    """
+    if bgr is None or bgr.size == 0:
+        return None
+
+    h, w = bgr.shape[:2]
+    img_area = float(h * w)
+    min_area = img_area * float(min_area_ratio)
+    max_area = img_area * float(max_area_ratio)
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 黑色前景：用 OTSU 自动阈值更稳（黑->1，白->0）
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    if morph_ksize and morph_ksize >= 3:
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_ksize, morph_ksize))
+        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=1)
+
+    contours, _hier = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        if area < min_area or area > max_area:
+            continue
+
+        x, y, ww, hh = cv2.boundingRect(cnt)
+        if ww <= 1 or hh <= 1:
+            continue
+
+        aspect = ww / float(hh)
+        if abs(aspect - 1.0) > aspect_tol:
+            continue
+
+        # 用“填充率”判断是否实心：轮廓mask中黑前景像素占 bounding box 的比例
+        mask = np.zeros((hh, ww), dtype=np.uint8)
+        cnt_shift = cnt.copy()
+        cnt_shift[:, 0, 0] -= x
+        cnt_shift[:, 0, 1] -= y
+        cv2.drawContours(mask, [cnt_shift], -1, 255, thickness=-1)
+
+        roi_bw = bw[y:y+hh, x:x+ww]
+        filled = cv2.countNonZero(cv2.bitwise_and(roi_bw, mask))
+        fill_ratio = filled / float(ww * hh)
+
+        if fill_ratio < fill_thresh:
+            continue
+
+        # 中心点（用 boundingRect 中心即可，够稳）
+        cx = x + ww / 2.0
+        cy = y + hh / 2.0
+
+        candidates.append({
+            "area": area,
+            "rect": (x, y, ww, hh),
+            "center": (cx, cy),
+            "fill": fill_ratio,
+        })
+
+    if len(candidates) < 2:
+        return None
+
+    # 取面积最大的两个
+    candidates.sort(key=lambda d: d["area"], reverse=True)
+    a, b = candidates[0], candidates[1]
+    (cax, cay), (cbx, cby) = a["center"], b["center"]
+
+    dx = abs(cax - cbx)
+    dy = abs(cay - cby)
+    if dx < 1 or dy < 1:
+        return None
+
+    # 对角线排列：x、y都应有明显差异，且 dx/dy 不要极端失衡
+    balance = abs(dx - dy) / max(dx, dy)  # 0=很像正对角，1=很偏
+    if balance > diag_balance_tol:
+        return None
+
+    # 固定顺序：返回 (左上, 右下)
+    if (cax + cay) <= (cbx + cby):
+        top_left = a
+        bottom_right = b
+    else:
+        top_left = b
+        bottom_right = a
+
+    # 两个正方形的最小外接“正方形”bbox
+    x1, y1, w1, h1 = top_left["rect"]
+    x2, y2, w2, h2 = bottom_right["rect"]
+    minx = min(x1, x2)
+    miny = min(y1, y2)
+    maxx = max(x1 + w1, x2 + w2)
+    maxy = max(y1 + h1, y2 + h2)
+
+    bwid = maxx - minx
+    bhei = maxy - miny
+    side = int(np.ceil(max(bwid, bhei)))
+
+    cx_all = (minx + maxx) / 2.0
+    cy_all = (miny + maxy) / 2.0
+    x0 = int(np.floor(cx_all - side / 2))
+    y0 = int(np.floor(cy_all - side / 2))
+    x1o = x0 + side
+    y1o = y0 + side
+
+    # clip 到图像范围
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1o = min(w, x1o)
+    y1o = min(h, y1o)
+
+    if debug_path:
+        dbg = bgr.copy()
+        for item, color in [(top_left, (0, 255, 0)), (bottom_right, (0, 255, 255))]:
+            x, y, ww, hh = item["rect"]
+            cv2.rectangle(dbg, (x, y), (x+ww, y+hh), color, 2)
+            cx, cy = item["center"]
+            cv2.drawMarker(dbg, (int(cx), int(cy)), color, cv2.MARKER_CROSS, 18, 2)
+        cv2.rectangle(dbg, (x0, y0), (x1o, y1o), (255, 0, 0), 2)
+        cv2.imwrite(debug_path, dbg)
+
+    return top_left["center"], bottom_right["center"], (x0, y0, x1o, y1o)
+
+def unsharp_mask(image, k=1.5):
+    """对 OpenCV 图像做反遮罩锐化，并尽量保持输入“原格式”。
+
+    - 保持通道数不变（BGR/灰度都支持）
+    - 保持 dtype 不变：
+      - uint8/uint16 等整数：会 clip 到类型范围再 cast 回原 dtype
+      - float32/float64：不强行 clip（除非你自己保证范围），返回同 dtype
+    """
+    if image is None:
+        return image
+
+    src = image
+    src_dtype = src.dtype
+
+    # 统一用 float32 做计算，避免 uint8 下溢/溢出
+    src_f = src.astype(np.float32, copy=False)
+    blurred = cv2.GaussianBlur(src_f, (9, 9), 10.0)
+    detail = src_f - blurred
+    sharpened = src_f + float(k) * detail
+
+    # 恢复到原 dtype
+    if np.issubdtype(src_dtype, np.integer):
+        info = np.iinfo(src_dtype)
+        sharpened = np.clip(sharpened, info.min, info.max)
+        return sharpened.astype(src_dtype)
+    # float：保持 dtype；不做 clip，避免误伤 HDR/归一化数据
+    return sharpened.astype(src_dtype, copy=False)
+
+
+def sharpen_keep_format(image: np.ndarray, k: float = 1.5) -> np.ndarray:
+    """更直观的别名：锐化并保持原 dtype/通道格式。"""
+    return unsharp_mask(image, k=k)
+
 def simulate_pointcloud_sampling(
     bgr: np.ndarray,
     downscale: float = 0.6,     # 0~1，越小越“块状”
@@ -96,6 +270,8 @@ def simulate_pointcloud_sampling(
     rng = np.random.default_rng(seed)
 
     img = bgr.copy()
+    cv2.imshow("img", img)
+    time.sleep(2)
     h, w = img.shape[:2]
 
     # 1) 降采样 + 最近邻放大（块状/锯齿）
@@ -318,6 +494,8 @@ def get_board_centers_from_screen(
     dictionary_name: ArUco 字典名称，用于标记检测
     """
     image = grab_screen()
+    # 可按需启用：对截图做锐化，但保持 BGR + dtype 不变
+    image = sharpen_keep_format(image, k=1.2)
     centers, records, detection = get_board_centers_from_image(
         image=image,
         groups=groups,
@@ -430,6 +608,10 @@ def main():
         center_list = list(centers.values())
         bboxes = [b for b in (bbox1, bbox2) if b is not None]
         annotated = annotate(image, detection, center_list, bboxes if bboxes else None)
+        res = detect_two_diagonal_filled_squares(image, debug_path="diagonal_squares_debug.png")
+        if res:
+            c1, c2, bbox = res
+            print(f"Detected diagonal filled squares centers: {c1}, {c2}, bbox: {bbox}")
         cv2.imshow("ArUco board centers", annotated)
         cv2.waitKey(2000)
         cv2.destroyAllWindows()

@@ -5,7 +5,7 @@ import shutil
 import ctypes
 import string
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 # 尝试导入 tkinter，用于弹窗重命名；若不可用则在运行时跳过弹窗
 try:
     import tkinter as tk
@@ -23,6 +23,8 @@ MIN_MB = 290.0
 MAX_MB = 680.0
 DRY_RUN = False                     # True 表示只列出不执行复制
 VERBOSE = True                      # True 打印详细信息
+REQUIRED_MOD_TIME = 2          # 1表示允许按修改日期过滤，且手动输入日期，2是只匹配最近7天,0表示不启用
+REQUIRED_MOD_DATE = "2026-01-29"   # 格式：YYYY-MM-DD
 
 def is_timestamp_dir(name):
     # 匹配 2025-11-11_15-50-12 这样的格式
@@ -246,6 +248,67 @@ def validate_paths(src, dst):
             return False
     return True
     
+def prompt_for_mod_date_filter(default_enabled: bool, default_date: str):
+    """
+    弹窗：勾选是否启用“按修改日期过滤”，并输入日期 YYYY-MM-DD
+    返回: (enabled: bool, date_str: str|None)
+    - 取消/关闭窗口 => (False, None)
+    - 未勾选 => (False, None)
+    """
+    if not tk:
+        return default_enabled, (default_date if default_enabled else None)
+
+    date_default = (default_date or datetime.now().strftime("%Y-%m-%d")).strip()
+
+    root = tk.Tk()
+    root.title("按修改日期过滤")
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    enabled_var = tk.BooleanVar(value=bool(default_enabled))
+    date_var = tk.StringVar(value=date_default)
+
+    tk.Label(root, text="是否启用“按目录最后修改日期过滤”？").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
+    tk.Checkbutton(root, text="启用", variable=enabled_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
+
+    tk.Label(root, text="日期 (YYYY-MM-DD)：").grid(row=2, column=0, sticky="w", padx=10, pady=(8, 0))
+    entry = tk.Entry(root, textvariable=date_var, width=18)
+    entry.grid(row=2, column=1, sticky="w", padx=10, pady=(8, 0))
+
+    result = {"ok": False}
+
+    def on_ok():
+        result["ok"] = True
+        root.destroy()
+
+    def on_cancel():
+        result["ok"] = False
+        root.destroy()
+
+    btn_frame = tk.Frame(root)
+    btn_frame.grid(row=3, column=0, columnspan=2, pady=12)
+    tk.Button(btn_frame, text="确定", width=10, command=on_ok).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="取消", width=10, command=on_cancel).pack(side="left", padx=6)
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    entry.focus_set()
+    root.mainloop()
+
+    if not result["ok"]:
+        return False, None
+
+    enabled = bool(enabled_var.get())
+    if not enabled:
+        return False, None
+
+    date_str = (date_var.get() or "").strip()
+    if not date_str:
+        return False, None
+
+    return True, date_str
+
 # 替换后的 main，使用脚本内常量且只检查一级子目录
 def main():
     # 需要管理员权限运行
@@ -257,6 +320,24 @@ def main():
     min_b = int(MIN_MB * 1024 * 1024)
     max_b = int(MAX_MB * 1024 * 1024)
 
+    required_date = None
+    if REQUIRED_MOD_TIME == 1:
+        try:
+            # 选框输入的日期格式为 YYYY-MM-DD
+            enabled, date_str = prompt_for_mod_date_filter(REQUIRED_MOD_TIME, REQUIRED_MOD_DATE)
+            if enabled:
+                required_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            print(f"REQUIRED_MOD_DATE 格式错误: {REQUIRED_MOD_DATE}，应为 YYYY-MM-DD")
+    elif REQUIRED_MOD_TIME == 2:
+        enabled = True
+        today = datetime.now().date()
+        required_date = [today - timedelta(days=i) for i in range(7)]
+    else:
+        enabled = False
+        date_str = None
+
+        
     print(f"validate_paths result: {validate_paths(src, dst)}")
     if VERBOSE and validate_paths(src, dst):
         print(f"搜索源: {src}")
@@ -282,6 +363,26 @@ def main():
     matched_any = False
     # 从最新开始检查，找到第一个大小在范围内的就处理并退出
     for d in candidates_sorted:
+        # 按目录“最后修改日期”过滤（不满足则直接跳过，不输出匹配结果）
+        if required_date is not None:
+            try:
+                mdate = datetime.fromtimestamp(os.path.getmtime(d)).date()
+            except Exception:
+                if VERBOSE:
+                    print(f"跳过: {d} 无法获取修改时间")
+                continue
+
+            
+            if REQUIRED_MOD_TIME == 2:
+                if mdate not in required_date:
+                    if VERBOSE:
+                        print(f"跳过: {d} 修改日期 {mdate} 不在最近7天内")
+                    continue
+            else:
+                if mdate != required_date:
+                    if VERBOSE:
+                        print(f"跳过: {d} 修改日期 {mdate} != {required_date}")
+                    continue
         try:
             size_b = get_folder_size_bytes(d)
         except Exception:
@@ -324,13 +425,14 @@ def main():
             # 如果实际完成了复制（非 DRY_RUN 且复制成功），在目标下创建 after/<同名>- 目录
             if not DRY_RUN and copy_done and final_basename:
                 after_parent = os.path.join(dst, "after")
-                after_dir = os.path.join(after_parent, f"{final_basename}-")
+                after_csv_dir = os.path.join(after_parent, "csv")
+                after_csv_dir = os.path.join(after_csv_dir, f"{final_basename}-")
                 try:
-                    os.makedirs(after_dir, exist_ok=True)
+                    os.makedirs(after_csv_dir, exist_ok=True)
                     if VERBOSE:
-                        print(f"已创建 after 目录: {after_dir}")
+                        print(f"已创建 after 目录: {after_csv_dir}")
                 except Exception as e:
-                    print(f"创建 after 目录失败: {after_dir} 错误: {e}")
+                    print(f"创建 after 目录失败: {after_csv_dir} 错误: {e}")
 
             # 找到并处理第一个匹配后立即停止
             break
