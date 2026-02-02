@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 from PIL import Image, ImageGrab
 
-
 def _order_points(pts: np.ndarray) -> np.ndarray:
     """4点排序：左上、右上、右下、左下"""
     pts = np.asarray(pts, dtype=np.float32)
@@ -14,7 +13,6 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     tr = pts[np.argmin(diff)]
     bl = pts[np.argmax(diff)]
     return np.array([tl, tr, br, bl], dtype=np.float32)
-
 
 def _load_image(image_path=None, mode=1):
     """
@@ -38,6 +36,10 @@ def _load_image(image_path=None, mode=1):
 
     elif mode == 1 and image_path is not None:
         img = cv2.imread(image_path)
+    elif mode == 3:
+        # 截图（全屏）
+        screenshot = ImageGrab.grab()
+        img = cv2.cvtColor(np.array(screenshot.convert("RGB")), cv2.COLOR_RGB2BGR)
 
     if img is None:
         print("错误：无法读取图像（路径/剪贴板内容无效）")
@@ -81,9 +83,57 @@ def _red_mask_by_sample_rgb(hsv_img, sample_rgb=(250, 50, 80), h_tol=10, s_tol=9
 
     return red_mask, (int(h), int(s), int(v))
 
+def _calculate_contour_center(cnt):
+    """计算单个轮廓的中心（质心），返回 (cx, cy)，失败返回 None"""
+    M = cv2.moments(cnt)
+    if M["m00"] != 0:  # 避免除以0（无效轮廓）
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        return (cx, cy)
+    return None
+
+def _find_isolated_contour(contours):
+    """
+    从轮廓列表中筛选出孤立的轮廓（基于中心距离，平均距离最大的轮廓即为孤立轮廓）
+    返回：孤立轮廓（单个cnt），若无法筛选返回面积最大的轮廓（兼容原逻辑）
+    """
+    if len(contours) == 1:
+        # 只有一个轮廓，直接返回
+        return contours[0]
+    
+    # 1. 计算所有轮廓的中心
+    contour_centers = []
+    valid_contours = []
+    for cnt in contours:
+        center = _calculate_contour_center(cnt)
+        if center is not None:
+            contour_centers.append(center)
+            valid_contours.append(cnt)
+    
+    if len(valid_contours) < 1:
+        return max(contours, key=cv2.contourArea)
+    
+    # 2. 计算每个轮廓与其他所有轮廓的平均距离
+    avg_distances = []
+    for i, (cx1, cy1) in enumerate(contour_centers):
+        distances = []
+        for j, (cx2, cy2) in enumerate(contour_centers):
+            if i != j:  # 排除自身
+                # 欧几里得距离
+                dist = np.sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+                distances.append(dist)
+        # 该轮廓的平均距离（越大表示越孤立）
+        avg_dist = np.mean(distances) if distances else 0
+        avg_distances.append(avg_dist)
+    
+    # 3. 筛选平均距离最大的轮廓（孤立轮廓）
+    isolated_idx = np.argmax(avg_distances)
+    return valid_contours[isolated_idx]
+
 def detect_target(image_path=None, mode=1, visualize=True):
     """
     提取标靶红色边缘轮廓，并用“方形”拟合，返回角点坐标（原图像素坐标）。
+    优化：基于标靶孤立性筛选轮廓，避免同色干扰影响拟合结果。
 
     返回：
     - result_img: 画了拟合方形的图
@@ -102,16 +152,15 @@ def detect_target(image_path=None, mode=1, visualize=True):
         hsv,
         sample_rgb=(250, 50, 80),
         h_tol=13,    # 色相容差：越大越宽松
-        s_tol=100,    # 饱和度容差
-        v_tol=100     # 亮度容差
-)
+        s_tol=130,   # 饱和度容差
+        v_tol=100    # 亮度容差
+    )
 
     # 2) 形态学去噪/补边
     kernel = np.ones((3, 3), np.uint8)
-    #red_mask_optimized = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    red_mask_optimized = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=6)
+    red_mask_optimized = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
 
-    # 3) 找轮廓（取最大轮廓作为标靶边缘）
+    # 3) 找轮廓 + 筛选有效轮廓
     contours, _ = cv2.findContours(red_mask_optimized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         print("未检测到红色边框轮廓")
@@ -122,9 +171,9 @@ def detect_target(image_path=None, mode=1, visualize=True):
             cv2.destroyAllWindows()
         return result_img, None
 
-    # 过滤太小的噪声后取最大
-    contours = [c for c in contours if cv2.contourArea(c) >= 200]
-    if not contours:
+    # 过滤太小的噪声
+    valid_contours = [c for c in contours if cv2.contourArea(c) >= 200]
+    if not valid_contours:
         print("红色轮廓存在，但都太小（被过滤）")
         if visualize:
             cv2.imshow("Original", result_img)
@@ -133,22 +182,23 @@ def detect_target(image_path=None, mode=1, visualize=True):
             cv2.destroyAllWindows()
         return result_img, None
 
-    all_pts = np.vstack(contours).astype(np.float32)  # shape: (N,1,2)
+    # 4) 筛选孤立轮廓（标靶），替代原有的“所有轮廓合集”
+    target_contour = _find_isolated_contour(valid_contours)
+    # 若需可视化孤立轮廓与其他轮廓的区别，可注释下方代码
+    # 绘制所有有效轮廓（蓝）+ 孤立标靶轮廓（红）
+    cv2.drawContours(result_img, valid_contours, -1, (255, 0, 0), 2)  # 所有有效轮廓（蓝）
+    cv2.drawContours(result_img, [target_contour], -1, (0, 0, 255), 3)  # 孤立标靶轮廓（红，粗线）
 
-    # 4) 方形拟合：用最小外接旋转矩形
-    rect = cv2.minAreaRect(all_pts)  # ((cx,cy),(w,h),angle)
+    # 5) 方形拟合：仅基于孤立标靶轮廓（替换原有的 all_pts 合集）
+    rect = cv2.minAreaRect(target_contour)  # ((cx,cy),(w,h),angle)
     (cx, cy), (w, h), angle = rect
 
-    side = float(max(w, h))
-    avg_side = float((w + h) / 2)
-    square_rect = ((cx, cy), (float(w),float(h)), angle)
-
+    square_rect = ((cx, cy), (float(w), float(h)), angle)
     box = cv2.boxPoints(square_rect)  # 4x2 float
     box = _order_points(box)
     box_int = np.round(box).astype(int)
 
-    # 5) 可视化：画轮廓+画拟合方形+写坐标
-    cv2.drawContours(result_img, contours, -1, (255, 0, 0), 2)  # 原轮廓(蓝)
+    # 6) 可视化：画拟合方形+写坐标
     cv2.polylines(result_img, [box_int], isClosed=True, color=(0, 255, 0), thickness=2)  # 拟合方形(绿)
 
     for i, (x, y) in enumerate(box_int):
@@ -156,14 +206,14 @@ def detect_target(image_path=None, mode=1, visualize=True):
         cv2.putText(result_img, f"P{i}:{x},{y}", (int(x) + 5, int(y) - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-    print("成功检测到标靶红色边缘，并完成方形拟合。")
+    print("成功检测到孤立标靶红色边缘，并完成方形拟合。")
     print("方形角点坐标(左上,右上,右下,左下)：")
     print(box_int.tolist())
 
     if visualize:
         cv2.imshow("Original+FitSquare", result_img)
         cv2.imshow("Detected_Red", red_mask_optimized)
-        cv2.waitKey(0)
+        cv2.waitKey(2500)
         cv2.destroyAllWindows()
 
     return result_img, box_int
@@ -173,4 +223,5 @@ def detect_target(image_path=None, mode=1, visualize=True):
 # 1) 本地图片
 # detect_target("target_image.jpg", mode=1, visualize=True)
 # 2) 剪贴板图片（先复制图片/截图/图片文件路径）
-detect_target(mode=2, visualize=True)
+if __name__ == "__main__":
+    detect_target(mode=2, visualize=True)

@@ -21,8 +21,10 @@ from PIL import ImageGrab
 from pywinauto import Application, timings, mouse
 from pywinauto.findwindows import ElementNotFoundError
 from pywinauto.keyboard import send_keys
-from visual import get_board_centers_from_screen, solve_board_center_bbox_from_two_markers
+#from visual import get_board_centers_from_screen, solve_board_center_bbox_from_two_markers
+from scantest import detect_target
 from keylistener import global_keyboard_listener
+from freegrab import grab_quadrilateral, _order_points
 
 ROOT_STR = r"C:\Users\ZN191014\Desktop\新建文件夹 (2)"
 POINTCLOUD_ROOT = Path(ROOT_STR)
@@ -219,38 +221,85 @@ def scroll_delay(center: tuple[int, int], wheel_dist: int=1, mouse: object=pywin
             break
 
 def click_view_for_task(window, task_name, timeout=3, title="查看"):
-    # 1) 定位这一行里“任务名称”的 DataItem
-    task_item = window.child_window(title=task_name, control_type="DataItem")
-    try:
-        task_item.wait("exists enabled visible", timeout=timeout)
-    except timings.TimeoutError:
-        logging.error("未找到任务行: %s", task_name)
+    task_name = (task_name or "").strip()
+    title = (title or "").strip()
+
+    task_re = re.compile(rf"^{re.escape(task_name)}(\(\d+\))?$")
+    today_time_re = re.compile(r"^今天\s*\d{{1,2}}:\d{{2}}$")
+
+    def find_task_items():
+        items = []
+        try:
+            for di in window.descendants(control_type="DataItem"):
+                t = (di.window_text() or "").strip()
+                if task_re.fullmatch(t):
+                    items.append(di)
+        except Exception:
+            pass
+        return items
+
+    def row_has_today_time(row):
+        try:
+            for w in row.descendants():
+                t = (w.window_text() or "").strip()
+                if today_time_re.match(t):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    # 1) 等待匹配到任务行（可能有多个：task / task(1) / task(2)）
+    end_t = time.time() + timeout
+    candidates = []
+    while time.time() < end_t:
+        candidates = find_task_items()
+        if candidates:
+            break
+        time.sleep(0.2)
+
+    if not candidates:
+        logging.error("未找到任务行(支持 task_name(数字) ): %s", task_name)
         return None
-    
-    # 2) 取父容器（同一行/同一组的容器）
+
+    # 2) 若多个，优先选父容器里带“今天 HH:MM”的那一行
+    if len(candidates) == 1:
+        task_item = candidates[0]
+    else:
+        scored = []
+        for di in candidates:
+            row = di.parent()
+            scored.append((row_has_today_time(row), di))
+
+        # True 优先
+        scored.sort(key=lambda x: x[0], reverse=True)
+        task_item = scored[0][1]
+
+    # 3) 取父容器（同一行/同一组的容器）
     row = task_item.parent()
 
-    # 3) 找同一父容器下的“查看 目录 原文件 删除”那格，再点里面的“查看”
+    # 4) 找同一父容器下动作列（通常文本以“查看”开头：查看 目录 原文件 删除）
     try:
-        actions_cell = row.child_window(title_re=f"{title}", control_type="DataItem")
+        actions_cell = row.child_window(title_re=rf"^{re.escape(title)}.*", control_type="DataItem")
+        actions_cell.wait("exists enabled visible", timeout=timeout)
         return actions_cell
-    except AttributeError:
+    except Exception:
         actions_w = None
         for di in row.descendants(control_type="DataItem"):
             t = (di.window_text() or "").strip()
-            if t.startswith(title):   # 匹配 "查看 目录 原文件 删除"
+            if t.startswith(title):
                 actions_w = di
                 break
-        if actions_w is not None:
-            actions_spec = window.child_window(handle=actions_w.handle)
 
-            # 4) 在动作列里找真正可点击的 “查看”（可能是 Text / Static / Hyperlink / Button）
-            for ct in ("Text", "Static", "Hyperlink", "Button"):
-                for w in actions_w.descendants(control_type=ct):
-                    if (w.window_text() or "").strip() == title:
-                        return w
-        else:
+        if actions_w is None:
             return None
+
+        # 5) 在动作列里找真正可点击的 “查看”（可能是 Text / Static / Hyperlink / Button）
+        for ct in ("Text", "Static", "Hyperlink", "Button"):
+            for w in actions_w.descendants(control_type=ct):
+                if (w.window_text() or "").strip() == title:
+                    return w
+
+        return None
         
 def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     # address_edit = None
@@ -268,7 +317,13 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     #     raise ElementNotFoundError("未找到地址栏 Edit 控件") visual
     
     dialog.set_focus()
-    click_button(dialog,title="此电脑", button_type="TreeItem")
+    try:
+        click_button(dialog,title="此电脑", button_type="TreeItem", timeout=2)
+    except timings.TimeoutError:
+        # 防止选择“此电脑”失败（如菜单被滚动出屏幕外）
+        for i in range(2):
+            # 多点几次确保之后点击地址输入文字正常
+            click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
     click_button(dialog,title="^(地址|address|add):.*", button_type="ToolBar", use_regex=True, timeout=WAIT_MAIN_WINDOW)
     #click_button(dialog, title="上一个位置", button_type="Button", offset=(-2, 0))
     send_keys(escape_send_keys(parent) + "{\}" + folder_name + "{ENTER}")
@@ -327,6 +382,22 @@ def save_clipboard_img_to_dir(folder_name: str, checktime: int=2) -> None:
     except Exception as e:
         print(f"\n程序运行出错：{str(e)}")
 
+def notify_start_select_points(timeout_ms: int = 1000, title: str = "提示", hwnd=None):
+    """Windows 简单弹窗提示，timeout_ms 毫秒后自动关闭；失败则降级为 print。"""
+    try:
+        owner = int(hwnd) if hwnd else 0
+        # 0 = MB_OK
+        ctypes.windll.user32.MessageBoxTimeoutW(
+            0,
+            "可以开始选点了",
+            title,
+            0,
+            0,
+            int(timeout_ms),
+        )
+    except Exception:
+        print(f"{title}: 可以开始选点了")
+
 def solve(window, app: Application, folder_name: str, button=None):
     """解算过程, return: 0失败，没找到坐标转换按钮，要求重试"""
 
@@ -363,7 +434,7 @@ def solve(window, app: Application, folder_name: str, button=None):
 
     while True:
         try:
-            click_button(window, title="浏览")
+            click_button(window, title="浏览",timeout=5)
             break
         except ElementNotFoundError:
             time.sleep(0.5)
@@ -403,10 +474,28 @@ def solve(window, app: Application, folder_name: str, button=None):
     # board_center_bbox_from_two_markers(image, corners_dict, (392, 393), L, sep)
     # newcenter2, bbox2 = solve_board_center_bbox_from_two_markers(image, corners_dict, (394, 395), L, sep)
     # time.sleep(0.5)
+    logging.debug("开始检测标靶位置")
+    point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
+    pcp, pcp_loc = point_cloud_image
+    center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
+    scroll_delay(center=center, wheel_dist= 11, mouse=mouse)
+    detected_img, bbox = detect_target(mode=3, visualize=True)
 
+    bbox1 = bbox[0]
 
+    if bbox is not None:
+        target_quad = [tuple(pt) for pt in bbox]
+        # 截取标靶四边形区域
+        img1 = grab_quadrilateral(
+            quad_points=target_quad,
+            output_size=(400, 400),
+            visualize=False
+        )
     # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
-    # cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker.png", cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2BGR))
+    #cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}.png", cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2BGR))
+    img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    logging.info("标靶位置检测完成，已保存图片到%s", f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    print("标靶位置检测完成，已保存图片到", f"{ROOT_STR}\\after\\img\\{folder_name}.png")
     # img2 = ImageGrab.grab(bbox=(bbox2[1], bbox2[0], bbox2[3], bbox2[2]))
     # cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker2.png", cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2BGR))
     # #选点
@@ -428,8 +517,10 @@ def solve(window, app: Application, folder_name: str, button=None):
     #     mouse.click(button="left", coords=(int(cx), int(cy)))
 
     # 将剪切板的图片保存为文件
-    save_clipboard_img_to_dir(folder_name)
+    #save_clipboard_img_to_dir(folder_name)
     # 手动选点
+    # 系统弹窗提醒可以开始选点
+    notify_start_select_points(timeout_ms=1000, title="选点提示", hwnd=window.handle)
     for i in range(5):
         try:
             click_button(window, title="真彩", click=True)
@@ -460,7 +551,13 @@ def solve(window, app: Application, folder_name: str, button=None):
             time.sleep(2)
     time.sleep(0.5)
     click_button(window, title="导出", button_type="Button")
-    click_button(window, title="选择文件夹")
+    dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
+    for i in range(3):
+        try:
+            click_button(dialog, title="选择文件夹")
+            break
+        except timings.TimeoutError:
+            time.sleep(0.5)
 
 
 def run_import_for_folder(app: Application, folders_list:list) -> None:
@@ -481,7 +578,7 @@ def run_import_for_folder(app: Application, folders_list:list) -> None:
     #     logging.info("导入完成: %s", folder)
     #     time.sleep(0.2)
 
-    time.sleep(1.0)
+    # time.sleep(1.0)
     logging.info("今天的点云全部导入完成")
 
 
@@ -555,9 +652,9 @@ def main() -> None:
     # 一次只能输入10个文件夹，防止软件无法判断是结算没完成还是在下一页
     #pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
     pending = []
-    #for test only
-    pending.append(Path(ROOT_STR + "\\" + "0973"))
-    pending.append(Path(ROOT_STR + "\\" + "0974"))
+    # for test only
+    #pending.append(Path(ROOT_STR + "\\" + "0973"))
+    pending.append(Path(ROOT_STR + "\\" + "2309"))
     # if not pending:
     #     logging.info("没有待导入的四位数点云文件夹。")
     #     return
