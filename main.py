@@ -47,11 +47,14 @@ def ensure_unique_dst(dst_parent, name):
     candidate = os.path.join(dst_parent, name)
     if not os.path.exists(candidate):
         return candidate
+
     suffix = 1
     while True:
-        new_name = f"{name}_copy{suffix}"
-        candidate = os.path.join(dst_parent, new_name)
-        if not os.path.exists(candidate):
+        # 重名时：把旧目录改名为 *_old1, *_old2 ...
+        old_name = f"{name}_old{suffix}"
+        old_path = os.path.join(dst_parent, old_name)
+        if not os.path.exists(old_path):
+            os.rename(candidate, old_path)
             return candidate
         suffix += 1
 

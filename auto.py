@@ -22,7 +22,7 @@ from pywinauto import Application, timings, mouse
 from pywinauto.findwindows import ElementNotFoundError
 from pywinauto.keyboard import send_keys
 #from visual import get_board_centers_from_screen, solve_board_center_bbox_from_two_markers
-from scantest import detect_target
+from scantest import detect_target, match_target_by_template, warp_by_bbox
 from keylistener import global_keyboard_listener
 from freegrab import grab_quadrilateral, _order_points
 
@@ -81,10 +81,10 @@ def list_pending_folders(root: Path, marker_root: Path) -> Iterable[Path]:
 def start_or_connect_app() -> Application:
     try:
         app = Application(backend="uia").connect(title=MAIN_WINDOW_TITLE, timeout=5)
-        logging.info("已连接到正在运行的程序。")
+        logging.info("Connected...")
         return app
     except Exception:
-        logging.info("尝试启动程序。")
+        logging.info("try to start application...")
         start_kwargs = {"timeout": WAIT_MAIN_WINDOW}
         if APP_WORKDIR:
             start_kwargs["work_dir"] = APP_WORKDIR
@@ -191,7 +191,7 @@ def click_button(
         except (ElementNotFoundError, timings.TimeoutError) as exc:
             last_exc = exc
 
-    logging.error("未找到控件: title=%s regex=%s type=%s", raw_title or (pattern.pattern if pattern else None), bool(pattern), button_type)
+    logging.error("NotFound: title=%s regex=%s type=%s", raw_title or (pattern.pattern if pattern else None), bool(pattern), button_type)
     #window.print_ctrl_ids()
     if last_exc:
         raise last_exc
@@ -258,7 +258,7 @@ def click_view_for_task(window, task_name, timeout=3, title="查看"):
         time.sleep(0.2)
 
     if not candidates:
-        logging.error("未找到任务行(支持 task_name(数字) ): %s", task_name)
+        logging.error("Not Found taskline: %s", task_name)
         return None
 
     # 2) 若多个，优先选父容器里带“今天 HH:MM”的那一行
@@ -317,13 +317,13 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     #     raise ElementNotFoundError("未找到地址栏 Edit 控件") visual
     
     dialog.set_focus()
-    try:
-        click_button(dialog,title="此电脑", button_type="TreeItem", timeout=2)
-    except timings.TimeoutError:
-        # 防止选择“此电脑”失败（如菜单被滚动出屏幕外）
-        for i in range(2):
-            # 多点几次确保之后点击地址输入文字正常
-            click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
+    # try:
+    #     click_button(dialog,title="此电脑", button_type="TreeItem", timeout=2)
+    # except timings.TimeoutError:
+    #     # 防止选择“此电脑”失败（如菜单被滚动出屏幕外）
+    #     for i in range(2):
+    #         # 多点几次确保之后点击地址输入文字正常
+    #         click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
     click_button(dialog,title="^(地址|address|add):.*", button_type="ToolBar", use_regex=True, timeout=WAIT_MAIN_WINDOW)
     #click_button(dialog, title="上一个位置", button_type="Button", offset=(-2, 0))
     send_keys(escape_send_keys(parent) + "{\}" + folder_name + "{ENTER}")
@@ -382,36 +382,54 @@ def save_clipboard_img_to_dir(folder_name: str, checktime: int=2) -> None:
     except Exception as e:
         print(f"\n程序运行出错：{str(e)}")
 
-def notify_start_select_points(timeout_ms: int = 1000, title: str = "提示", hwnd=None):
+def pil_save_cv(img: np.ndarray, save_path: str | Path, *, quality=95) -> None:
+    save_path = str(save_path)
+
+    if img is None or not isinstance(img, np.ndarray) or img.size == 0:
+        raise ValueError("img 为空或不是有效的 OpenCV ndarray 图像")
+
+    if img.ndim == 2:
+        pil_img = Image.fromarray(img)  # 灰度
+    elif img.ndim == 3 and img.shape[2] == 3:
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    elif img.ndim == 3 and img.shape[2] == 4:
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA))
+    else:
+        raise ValueError(f"不支持的图像形状: {img.shape}")
+
+    # PNG 不看 quality；JPEG 才看 quality
+    pil_img.save(save_path, quality=quality)
+
+def notify_start_select_points(timeout_ms: int = 1000, title: str = "提示", hwnd=None, msg: str = "可以开始选点了"):
     """Windows 简单弹窗提示，timeout_ms 毫秒后自动关闭；失败则降级为 print。"""
     try:
         owner = int(hwnd) if hwnd else 0
         # 0 = MB_OK
         ctypes.windll.user32.MessageBoxTimeoutW(
             0,
-            "可以开始选点了",
+            msg,
             title,
             0,
             0,
             int(timeout_ms),
         )
     except Exception:
-        print(f"{title}: 可以开始选点了")
+        print(f"{title}: {msg}")
 
 def solve(window, app: Application, folder_name: str, button=None):
     """解算过程, return: 0失败，没找到坐标转换按钮，要求重试"""
 
     # 定义要是别的板子名字和板子含有的charuco id
-    target_ids = [392, 393, 394, 395]
-    groups = {
-        "boardA_392_393": [target_ids[0],target_ids[1]],
-        "boardB_394_395": [target_ids[2],target_ids[3]],
-    }
+    # target_ids = [392, 393, 394, 395]
+    # groups = {
+    #     "boardA_392_393": [target_ids[0],target_ids[1]],
+    #     "boardB_394_395": [target_ids[2],target_ids[3]],
+    # }
 
     # # 坐标转换
     while True:
         try:
-            click_button(window, title="坐标转换")
+            click_button(window, title="坐标转换", button_type="Text", timeout=5)
             break
         except timings.TimeoutError:
             #button.click_input()
@@ -430,7 +448,6 @@ def solve(window, app: Application, folder_name: str, button=None):
     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
     choose_folder(dialog,"after"+"{\}"+ "csv" + "{\}" + folder_name + "{-}")
     click_button(window, title="确认")
-    time.sleep(0.8)
 
     while True:
         try:
@@ -474,28 +491,31 @@ def solve(window, app: Application, folder_name: str, button=None):
     # board_center_bbox_from_two_markers(image, corners_dict, (392, 393), L, sep)
     # newcenter2, bbox2 = solve_board_center_bbox_from_two_markers(image, corners_dict, (394, 395), L, sep)
     # time.sleep(0.5)
-    logging.debug("开始检测标靶位置")
+    logging.debug("Start detect target...")
     point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
     pcp, pcp_loc = point_cloud_image
     center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
-    scroll_delay(center=center, wheel_dist= 11, mouse=mouse)
-    detected_img, bbox = detect_target(mode=3, visualize=True)
-
-    bbox1 = bbox[0]
+    scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
+    detected_img, bbox = detect_target(mode=3, visualize=False)
 
     if bbox is not None:
-        target_quad = [tuple(pt) for pt in bbox]
         # 截取标靶四边形区域
-        img1 = grab_quadrilateral(
-            quad_points=target_quad,
-            output_size=(400, 400),
-            visualize=False
-        )
+        img1 = warp_by_bbox(detected_img, bbox, (800, 800))
+        img_match = match_target_by_template("image.png", img1, mode=1, visualize=False)
+        for i in img_match:
+            if i is None:
+                logging.error("failed to match target position, please select point manually")
+                print("标靶位置检测失败，请手动确认截图选点")
+                img1 = detected_img
+                break
     # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
-    #cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}.png", cv2.cvtColor(np.array(img1), cv2.COLOR_RGB2BGR))
-    img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
-    logging.info("标靶位置检测完成，已保存图片到%s", f"{ROOT_STR}\\after\\img\\{folder_name}.png")
-    print("标靶位置检测完成，已保存图片到", f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    img1_save_path = PROCESSED_MARK_DIR / f"img\\{folder_name}.png"
+    try:
+        img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    except AttributeError:
+        # img1 是 ndarray
+        pil_save_cv(img1, img1_save_path)
+
     # img2 = ImageGrab.grab(bbox=(bbox2[1], bbox2[0], bbox2[3], bbox2[2]))
     # cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker2.png", cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2BGR))
     # #选点
@@ -523,7 +543,7 @@ def solve(window, app: Application, folder_name: str, button=None):
     notify_start_select_points(timeout_ms=1000, title="选点提示", hwnd=window.handle)
     for i in range(5):
         try:
-            click_button(window, title="真彩", click=True)
+            click_button(window, title="真彩", button_type="Text", click=True)
             break
         except ElementNotFoundError:
             try:
@@ -532,8 +552,7 @@ def solve(window, app: Application, folder_name: str, button=None):
             except ElementNotFoundError:
                 pass
     click_button(window, title="强度")
-    click_button(window, title="坐标")
-    time.sleep(0.5)
+    click_button(window, title="坐标", button_type="Text", click=True)
 
     # 等待用户按下两次回车
     print("请在软件界面手动选点，选点完成后连续按两次回车以继续...")
@@ -544,26 +563,26 @@ def solve(window, app: Application, folder_name: str, button=None):
     # 导出坐标
     while True:
         try:
-            click_button(window, title="导出坐标")
+            click_button(window, title="导出坐标", button_type="Text")
             break
         except ElementNotFoundError or timings.TimeoutError:
-            logging.error("点击导出没反应，请检查选点的数量再重试")
-            time.sleep(2)
+            logging.error("Click Error: Retrying...")
+            time.sleep(1)
     time.sleep(0.5)
     click_button(window, title="导出", button_type="Button")
     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
     for i in range(3):
         try:
-            click_button(dialog, title="选择文件夹")
+            click_button(dialog, title="选择文件夹", button_type="Button")
             break
         except timings.TimeoutError:
-            time.sleep(0.5)
+            time.sleep(0.3)
 
 
 def run_import_for_folder(app: Application, folders_list:list) -> None:
     find = False #是否找到任务行
     window = ensure_main_window(app)
-    click_button(window, title="主页")
+    click_button(window, title="主页", button_type="TabItem")
     # for folder in folders_list:
     #     logging.info("开始导入: %s", folder)
     #     click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
@@ -579,25 +598,14 @@ def run_import_for_folder(app: Application, folders_list:list) -> None:
     #     time.sleep(0.2)
 
     # time.sleep(1.0)
-    logging.info("今天的点云全部导入完成")
+    logging.info("Finished importing all folders, start processing...")
 
 
-    # while True:
-    #     try:
-    #         # task_view type: return folders_list[0].name ’s line eg: DataItem - '查看 目录 原文件 删除'
-    #         w = c.wrapper_object() if hasattr(c, "wrapper_object") else c
-    #         if bool(w) and w.is_visible() and w.is_enabled():
-    #             c.click_input()
-    #             break
-    #         continue
-    #     except TimeoutError:
-    #         pass
-    # time.sleep(10)
     for folder in folders_list:
         #阻塞直到导入完成
         #c = click_view_for_task(window, folder.name)
         ret = 0
-        logging.error("未找到坐标转换按钮，跳过此文件夹重试。")
+        logging.error("Cannot find addr connvert button, retrying...")
         click_button(window, "1", button_type="Text", timeout=2)
         #c = click_view_for_task(window, folder.name)
         for i in range(8): #最多翻8页
@@ -610,19 +618,18 @@ def run_import_for_folder(app: Application, folders_list:list) -> None:
                 click_button(window, "下一页",button_type="Button", timeout=2)
 
         if not find:
-            logging.error("未找到任务行: %s，跳过此文件夹重试。", folder.stem)
+            logging.error("Cannot find task row: %s, skipping this folder and retrying.", folder.stem)
             continue
-        time.sleep(5)#等待界面转换
+        time.sleep(2)#等待界面转换
         #click_view_for_task(window, "")#测试用，点开别的任务
         ret = solve(window, app, folder.stem)
         if ret == -1:
-            logging.error("坐标转换失败，跳过此文件夹%s重试。", folder.stem)
+            logging.error("Coordinate conversion failed, skipping this folder %s retry", folder.stem)
             continue
         time.sleep(1)
         for i in range(3):
-            click_button(window, title="主页")
+            click_button(window, title="主页", button_type="TabItem", timeout=2)
             time.sleep(0.3)
-        time.sleep(1)
             
         #solve(window, app, folder.stem)
 
@@ -648,13 +655,13 @@ def run_import_for_folder(app: Application, folders_list:list) -> None:
 
 def main() -> None:
     setup_logging()
-    logging.info("程序开始运行。")
+    logging.info("Start...")
     # 一次只能输入10个文件夹，防止软件无法判断是结算没完成还是在下一页
     #pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
     pending = []
     # for test only
     #pending.append(Path(ROOT_STR + "\\" + "0973"))
-    pending.append(Path(ROOT_STR + "\\" + "2309"))
+    pending.append(Path(ROOT_STR + "\\" + "1005"))
     # if not pending:
     #     logging.info("没有待导入的四位数点云文件夹。")
     #     return
@@ -663,7 +670,8 @@ def main() -> None:
         run_import_for_folder(app, pending)
         time.sleep(2)
     except Exception as exc:
-        logging.exception("处理 %s 时出现异常: %s", pending, exc)
+        logging.exception("Process %s Error: %s", pending, exc)
+    logging.info("All done...")
 
 
 
