@@ -388,6 +388,23 @@ def pil_save_cv(img: np.ndarray, save_path: str | Path, *, quality=95) -> None:
     if img is None or not isinstance(img, np.ndarray) or img.size == 0:
         raise ValueError("img 为空或不是有效的 OpenCV ndarray 图像")
 
+    # 确保目录存在
+    parent = os.path.dirname(save_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    # 重名规则：同名直接替换（先删掉旧文件更稳）
+    if os.path.exists(save_path):
+        try:
+            os.remove(save_path)
+        except Exception:
+            # 例如只读/占用：尽量改权限再删
+            try:
+                os.chmod(save_path, 0o666)# 修改为可读写
+                os.remove(save_path)
+            except Exception:
+                pass
+
     if img.ndim == 2:
         pil_img = Image.fromarray(img)  # 灰度
     elif img.ndim == 3 and img.shape[2] == 3:
@@ -447,18 +464,18 @@ def solve(window, app: Application, folder_name: str, button=None):
     time.sleep(0.5)
     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
     choose_folder(dialog,"after"+"{\}"+ "csv" + "{\}" + folder_name + "{-}")
-    click_button(window, title="确认")
+    click_button(window, title="确认", button_type="Button")
 
     while True:
         try:
-            click_button(window, title="浏览",timeout=5)
+            click_button(window, title="浏览", button_type="Button",timeout=5)
             break
         except ElementNotFoundError:
             time.sleep(0.5)
         except timings.TimeoutError:
             logging.error("可能是点云未固定")
-            click_button(window, title="返回")
-            click_button(window, title="主页")
+            click_button(window, title="返回", button_type="Button")
+            click_button(window, title="主页", button_type="TabItem")
             return -1
     time.sleep(6)
 
@@ -547,7 +564,7 @@ def solve(window, app: Application, folder_name: str, button=None):
             break
         except ElementNotFoundError:
             try:
-                click_button(window, title="高程", click=True)
+                click_button(window, title="高程", button_type="Text", click=True)
                 break
             except ElementNotFoundError:
                 pass
@@ -660,7 +677,7 @@ def main() -> None:
     #pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
     pending = []
     # for test only
-    #pending.append(Path(ROOT_STR + "\\" + "0973"))
+    pending.append(Path(ROOT_STR + "\\" + "0973"))
     pending.append(Path(ROOT_STR + "\\" + "1005"))
     # if not pending:
     #     logging.info("没有待导入的四位数点云文件夹。")
