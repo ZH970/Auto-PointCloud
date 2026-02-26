@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import cv2
 import os
+import subprocess
 
 from PIL import Image
 from ctypes import wintypes
@@ -44,8 +45,7 @@ WAIT_ACTION = 5
 FOLDER_REGEX = re.compile(r"^\d{4}$")
 L = 10 #标记宽度
 sep = 5 #标记间缝隙宽度
-
-
+  
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=[
     logging.FileHandler("process.log"), # 输出到文件
@@ -317,13 +317,13 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     #     raise ElementNotFoundError("未找到地址栏 Edit 控件") visual
     
     dialog.set_focus()
-    # try:
-    #     click_button(dialog,title="此电脑", button_type="TreeItem", timeout=2)
-    # except timings.TimeoutError:
-    #     # 防止选择“此电脑”失败（如菜单被滚动出屏幕外）
-    #     for i in range(2):
-    #         # 多点几次确保之后点击地址输入文字正常
-    #         click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
+    try:
+        click_button(dialog,title="此电脑", button_type="TreeItem", timeout=2)
+    except timings.TimeoutError:
+        # 防止选择“此电脑”失败（如菜单被滚动出屏幕外）
+        for i in range(2):
+            # 多点几次确保之后点击地址输入文字正常
+            click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
     click_button(dialog,title="^(地址|address|add):.*", button_type="ToolBar", use_regex=True, timeout=WAIT_MAIN_WINDOW)
     #click_button(dialog, title="上一个位置", button_type="Button", offset=(-2, 0))
     send_keys(escape_send_keys(parent) + "{\}" + folder_name + "{ENTER}")
@@ -340,6 +340,30 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
     # send_keys("{ENTER}")
     # time.sleep(0.3)
     # click_button(dialog, SELECT_BUTTON_TEXT, timeout=WAIT_ACTION)
+
+def set_clipboard_text(text: str, timeout_sec: int = 3) -> None:
+    """将文本写入剪贴板；用于覆盖掉旧的图片剪贴板内容。"""
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    # 空字符串有时等价于“清空”，这里用空格确保剪贴板顶部格式是文本而不是图片
+    if text == "":
+        text = " "
+
+    # PowerShell Set-Clipboard：稳定、无需 GlobalAlloc/GlobalLock
+    # 用 here-string，避免引号转义问题（只需处理单引号）
+    safe = text.replace("'", "''")
+    ps_cmd = "Set-Clipboard -Value @'\n" + safe + "\n'@"
+
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+    )
 
 def save_clipboard_img_to_dir(folder_name: str, checktime: int=2) -> None:
     """
@@ -463,8 +487,15 @@ def solve(window, app: Application, folder_name: str, button=None):
     # 选择文件夹的子窗口
     time.sleep(0.5)
     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
+    # 检查目录是否存在，不存在则创建
+    check_dir = Path(PROCESSED_MARK_DIR) / "csv" / (folder_name + "-")
+    if not check_dir.exists():
+        check_dir.mkdir(parents=True, exist_ok=True)
     choose_folder(dialog,"after"+"{\}"+ "csv" + "{\}" + folder_name + "{-}")
     click_button(window, title="确认", button_type="Button")
+
+    # 写入剪切板对图片进行隔离
+    set_clipboard_text(" ")
 
     while True:
         try:
@@ -512,49 +543,34 @@ def solve(window, app: Application, folder_name: str, button=None):
     point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
     pcp, pcp_loc = point_cloud_image
     center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
-    scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
-    detected_img, bbox = detect_target(mode=3, visualize=False)
+    # scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
+    # detected_img, bbox = detect_target(mode=3, visualize=False) #mode 修改图片获取方式
 
-    if bbox is not None:
-        # 截取标靶四边形区域
-        img1 = warp_by_bbox(detected_img, bbox, (800, 800))
-        img_match = match_target_by_template("image.png", img1, mode=1, visualize=False)
-        for i in img_match:
-            if i is None:
-                logging.error("failed to match target position, please select point manually")
-                print("标靶位置检测失败，请手动确认截图选点")
-                img1 = detected_img
-                break
-    # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
-    img1_save_path = PROCESSED_MARK_DIR / f"img\\{folder_name}.png"
-    try:
-        img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
-    except AttributeError:
-        # img1 是 ndarray
-        pil_save_cv(img1, img1_save_path)
-
-    # img2 = ImageGrab.grab(bbox=(bbox2[1], bbox2[0], bbox2[3], bbox2[2]))
-    # cv2.imwrite(f"{ROOT_STR}\\after\\img\\{folder_name}marker2.png", cv2.cvtColor(np.array(img2), cv2.COLOR_RGB2BGR))
-    # #选点
-    # try:
-    #     click_button(window, title="真彩", click=False)
-    # except ElementNotFoundError:
+    # if bbox is not None:
+    #     # 截取标靶四边形区域
+    #     img1 = warp_by_bbox(detected_img, bbox, (800, 800))
+    #     img_match = match_target_by_template("image.png", img1, mode=1, visualize=False)
+    #     for i in img_match:
+    #         if i is None:
+    #             logging.error("failed to match target position, please select point manually")
+    #             print("标靶位置检测失败，请手动确认截图选点")
+    #             img1 = detected_img
+    #             # 将剪切板的图片保存为文件
+    #             save_clipboard_img_to_dir(folder_name)
+    #             break
+    #     # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
+    #     img1_save_path = PROCESSED_MARK_DIR / f"img\\{folder_name}.png"
     #     try:
-    #         click_button(window, title="高程", click=False)
-    #     except ElementNotFoundError:
-    #         pass
-    # click_button(window, title="强度")
-    # click_button(window, title="坐标")
+    #         img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    #     except (AttributeError, UnboundLocalError):
+    #         # img1 是 ndarray
+    #         pil_save_cv(img1, img1_save_path)
 
-    # if newcenter1 is not None:
-    #     cx, cy = newcenter1
-    #     mouse.click(button="left", coords=(int(cx), int(cy)))
-    # if newcenter2 is not None:
-    #     cx, cy = newcenter2
-    #     mouse.click(button="left", coords=(int(cx), int(cy)))
-
+    # else:
+    # logging.error("未检测到标靶位置，无法自动选点，请手动选点")
+    # print("未检测到标靶位置，无法自动选点，请手动确认截图选点")
     # 将剪切板的图片保存为文件
-    #save_clipboard_img_to_dir(folder_name)
+    save_clipboard_img_to_dir(folder_name)
     # 手动选点
     # 系统弹窗提醒可以开始选点
     notify_start_select_points(timeout_ms=1000, title="选点提示", hwnd=window.handle)
@@ -676,9 +692,12 @@ def main() -> None:
     # 一次只能输入10个文件夹，防止软件无法判断是结算没完成还是在下一页
     #pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
     pending = []
-    # for test only
-    pending.append(Path(ROOT_STR + "\\" + "0973"))
-    pending.append(Path(ROOT_STR + "\\" + "1005"))
+    # for test only    
+    #pending.append(Path(ROOT_STR + "\\" + "1169"))
+    pending.append(Path(ROOT_STR + "\\" + "1170"))
+    pending.append(Path(ROOT_STR + "\\" + "1173"))
+    pending.append(Path(ROOT_STR + "\\" + "1172"))
+    
     # if not pending:
     #     logging.info("没有待导入的四位数点云文件夹。")
     #     return

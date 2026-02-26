@@ -16,7 +16,7 @@ from openpyxl.drawing.image import Image as XLImage
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CSV = os.path.join(current_dir, "points.csv")
-DEFAULT_CSV1 = os.path.join(r"C:\Users\ZN191014\Desktop\新建文件夹 (2)\after\0073-", "points.csv")
+DEFAULT_CSV1 = os.path.join(r"C:\Users\ZN191014\Desktop\新建文件夹 (2)\after\csv\1169-", "points.csv")
 DEFAULT_WORKBOOK = os.path.join(current_dir, "SLAM扫描测试.xlsx")
 DEFAULT_WORKBOOK1 = os.path.join(r"C:\Users\ZN191014\Documents\WXWork\1688857910833845\Cache\File\2025-11",
                                  "检测数据（新）.xlsx")

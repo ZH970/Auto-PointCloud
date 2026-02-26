@@ -373,7 +373,7 @@ def match_target_by_template(
 if __name__ == "__main__":
     img, bbox = detect_target(mode=2, visualize=True)
     img = _load_image(mode=2)              # 读剪贴板原图
-    vis, bbox = detect_target(mode=2, visualize=True)  # 你现在 detect_target 会再读一次图；后面我再教你怎么改成传 img
+    vis, bbox = detect_target(mode=2, visualize=False)  # 你现在 detect_target 会再读一次图；后面我再教你怎么改成传 img
     warped = warp_by_bbox(img, bbox, (400, 400))
 
     cv2.imshow("Extracted_Quadrilateral", warped)
