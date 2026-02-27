@@ -53,6 +53,9 @@ class App(tk.Tk):
 
         self.log_q: "queue.Queue[str]" = queue.Queue()
 
+        self._proc_lock = threading.Lock()
+        self._procs: dict[str, subprocess.Popen] = {}
+
         cfg = _load_config()
         self.vars = {k: tk.StringVar(value=str(cfg.get(k, ENV_KEYS[k]))) for k in ENV_KEYS}
 
@@ -111,18 +114,20 @@ class App(tk.Tk):
         self._row(parent, 7, "DRY_RUN(0/1)", "SPC_DRY_RUN")
         self._row(parent, 8, "VERBOSE(0/1)", "SPC_VERBOSE")
 
-        ttk.Button(parent, text="运行 main.py（导入/重命名）", command=self.run_main).grid(
-            row=9, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10)
-        )
+        btns = ttk.Frame(parent)
+        btns.grid(row=9, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10))
+        ttk.Button(btns, text="运行 main.py（导入/重命名）", command=self.run_main).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="停止 main.py", command=lambda: self.stop_script("main.py")).pack(side="left", padx=(8, 0))
 
     def _build_auto_tab(self, parent):
         self._row(parent, 0, "点云根目录 ROOT_STR", "SPC_ROOT_STR", browse=True, kind="dir")
         self._row(parent, 1, "LidarME 程序路径 APP_EXE", "SPC_APP_EXE", browse=True, kind="file")
         self._row(parent, 2, "指定待处理(逗号分隔)", "SPC_PENDING")
 
-        ttk.Button(parent, text="运行 auto.py（自动操作）", command=self.run_auto).grid(
-            row=3, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10)
-        )
+        btns = ttk.Frame(parent)
+        btns.grid(row=3, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10))
+        ttk.Button(btns, text="运行 auto.py（自动操作）", command=self.run_auto).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="停止 auto.py", command=lambda: self.stop_script("auto.py")).pack(side="left", padx=(8, 0))
 
     def _build_excel_tab(self, parent):
         self._row(parent, 0, "points.csv 路径", "SPC_CSV", browse=True, kind="file")
@@ -131,9 +136,29 @@ class App(tk.Tk):
         self._row(parent, 3, "另存为(可空)", "SPC_SAVE_AS", browse=True, kind="file")
         self._row(parent, 4, "保留图片列(默认1)", "SPC_PRESERVE_IMAGE_COLUMN")
 
-        ttk.Button(parent, text="运行 points2SLAM_Output.py（写入Excel）", command=self.run_excel).grid(
-            row=5, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10)
-        )
+        btns = ttk.Frame(parent)
+        btns.grid(row=5, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10))
+        ttk.Button(btns, text="运行 points2SLAM_Output.py（写入Excel）", command=self.run_excel).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="停止 points2SLAM_Output.py", command=lambda: self.stop_script("points2SLAM_Output.py")).pack(side="left", padx=(8, 0))
+
+    def stop_script(self, script: str):
+        with self._proc_lock:
+            p = self._procs.get(script)
+
+        if not p or p.poll() is not None:
+            self._log(f"[UI] {script} 当前未运行。")
+            return
+
+        try:
+            self._log(f"[UI] 正在停止：{script} (pid={p.pid})")
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._log(f"[UI] terminate 超时，强制 kill：{script}")
+                p.kill()
+        except Exception as e:
+            self._log(f"[UI] 停止失败：{script}，{e}")
 
     def save_cfg(self):
         cfg = {k: self.vars[k].get() for k in self.vars}
@@ -144,6 +169,10 @@ class App(tk.Tk):
         env = os.environ.copy()
         for k, v in self.vars.items():
             env[k] = v.get()
+
+        # 强制子进程 stdout/stderr 用 utf-8
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         return env
 
     def _run_script(self, script: str, args: list[str]):
@@ -163,6 +192,9 @@ class App(tk.Tk):
                 encoding="utf-8",
                 errors="replace",
             )
+            with self._proc_lock:
+                self._procs[script] = p
+                
             assert p.stdout is not None
             for line in p.stdout:
                 self._log(line.rstrip("\n"))
@@ -170,6 +202,11 @@ class App(tk.Tk):
             self._log(f"[DONE] {script} exit={rc}")
         except Exception as e:
             self._log(f"[ERROR] 运行失败：{e}")
+        finally:
+            with self._proc_lock:
+                cur = self._procs.get(script)
+                if cur and cur.poll() is not None:
+                    self._procs.pop(script, None)
 
     def _run_bg(self, func):
         t = threading.Thread(target=func, daemon=True)

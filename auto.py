@@ -684,9 +684,18 @@ def run_import_for_folder(app: Application, folders_list:list) -> None:
     # except ElementNotFoundError:
     #     logging.warning("未见确认对话框，继续。")
 
+def _apply_env_overrides():
+    """允许 ui.py 通过环境变量覆盖 auto.py 的配置。"""
+    global ROOT_STR, POINTCLOUD_ROOT, PROCESSED_MARK_DIR, APP_EXE
 
+    ROOT_STR = os.getenv("SPC_ROOT_STR", ROOT_STR)
+    APP_EXE = os.getenv("SPC_APP_EXE", APP_EXE)
+
+    POINTCLOUD_ROOT = Path(ROOT_STR)
+    PROCESSED_MARK_DIR = POINTCLOUD_ROOT / "after"
 
 def main() -> None:
+    _apply_env_overrides()
     setup_logging()
     logging.info("Start...")
     # 一次只能输入10个文件夹，防止软件无法判断是结算没完成还是在下一页
@@ -694,8 +703,8 @@ def main() -> None:
     pending = []
     # for test only    
     #pending.append(Path(ROOT_STR + "\\" + "1169"))
-    pending.append(Path(ROOT_STR + "\\" + "1170"))
-    pending.append(Path(ROOT_STR + "\\" + "1173"))
+    # pending.append(Path(ROOT_STR + "\\" + "1170"))
+    # pending.append(Path(ROOT_STR + "\\" + "1173"))
     pending.append(Path(ROOT_STR + "\\" + "1172"))
     
     # if not pending:

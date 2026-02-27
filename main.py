@@ -26,6 +26,41 @@ VERBOSE = True                      # True 打印详细信息
 REQUIRED_MOD_TIME = 2          # 1表示允许按修改日期过滤，且手动输入日期，2是只匹配最近7天,0表示不启用
 REQUIRED_MOD_DATE = "2026-01-29"   # 格式：YYYY-MM-DD
 
+def _apply_env_overrides():
+    """允许 ui.py 通过环境变量覆盖 main.py 的配置（不破坏原有默认值）。"""
+    global SRC_LABEL, SRC_SUBPATH, DST, MIN_MB, MAX_MB, DRY_RUN, VERBOSE, REQUIRED_MOD_TIME, REQUIRED_MOD_DATE
+
+    SRC_LABEL = os.getenv("SPC_SRC_LABEL", SRC_LABEL)
+    SRC_SUBPATH = os.getenv("SPC_SRC_SUBPATH", SRC_SUBPATH)
+    DST = os.getenv("SPC_DST", DST)
+
+    def _f(name, cur):
+        v = os.getenv(name, "")
+        try:
+            return float(v) if v != "" else cur
+        except Exception:
+            return cur
+
+    def _i(name, cur):
+        v = os.getenv(name, "")
+        try:
+            return int(v) if v != "" else cur
+        except Exception:
+            return cur
+
+    def _b(name, cur):
+        v = os.getenv(name, "")
+        if v == "":
+            return cur
+        return v.strip() not in ("0", "false", "False", "no", "NO")
+
+    MIN_MB = _f("SPC_MIN_MB", MIN_MB)
+    MAX_MB = _f("SPC_MAX_MB", MAX_MB)
+    REQUIRED_MOD_TIME = _i("SPC_REQUIRED_MOD_TIME", REQUIRED_MOD_TIME)
+    REQUIRED_MOD_DATE = os.getenv("SPC_REQUIRED_MOD_DATE", REQUIRED_MOD_DATE)
+    DRY_RUN = _b("SPC_DRY_RUN", DRY_RUN)
+    VERBOSE = _b("SPC_VERBOSE", VERBOSE)
+
 def is_timestamp_dir(name):
     # 匹配 2025-11-11_15-50-12 这样的格式
     return re.match(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$', name) is not None
@@ -324,6 +359,9 @@ def main():
     max_b = int(MAX_MB * 1024 * 1024)
 
     required_date = None
+
+    _apply_env_overrides()
+    
     if REQUIRED_MOD_TIME == 1:
         try:
             # 选框输入的日期格式为 YYYY-MM-DD
