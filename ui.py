@@ -25,7 +25,9 @@ ENV_KEYS = {
     # auto.py
     "SPC_ROOT_STR": r"C:\Users\ZN191014\Desktop\新建文件夹 (2)",
     "SPC_APP_EXE": r"C:\Program Files\Lidar-ME\Lidar ME\Lidar ME.exe",
+    "SPC_AUTO_PENDING": "1",  # 新增：1=自动识别；0=手动输入 SPC_PENDING
     "SPC_PENDING": "",  # 例如 "1172,1173"；留空则按 auto.py 自己的 list_pending_folders 规则
+    "SPC_DO_IMPORT": "1", # auto.py 中是否执行导入（否则只执行后续的自动化操作），默认为1（执行导入）
     # points2SLAM_Output.py
     "SPC_CSV": "",
     "SPC_WORKBOOK": "",
@@ -55,6 +57,9 @@ class App(tk.Tk):
 
         self._proc_lock = threading.Lock()
         self._procs: dict[str, subprocess.Popen] = {}
+
+        self._pending_entry: ttk.Entry | None = None
+        self._auto_pending_cb: ttk.Checkbutton | None = None
 
         cfg = _load_config()
         self.vars = {k: tk.StringVar(value=str(cfg.get(k, ENV_KEYS[k]))) for k in ENV_KEYS}
@@ -122,10 +127,47 @@ class App(tk.Tk):
     def _build_auto_tab(self, parent):
         self._row(parent, 0, "点云根目录 ROOT_STR", "SPC_ROOT_STR", browse=True, kind="dir")
         self._row(parent, 1, "LidarME 程序路径 APP_EXE", "SPC_APP_EXE", browse=True, kind="file")
-        self._row(parent, 2, "指定待处理(逗号分隔)", "SPC_PENDING")
+
+        # 自动识别开关
+        ttk.Label(parent, text="待处理来源", width=22).grid(row=2, column=0, sticky="w", padx=8, pady=6)
+
+        def _toggle_pending_state():
+            auto_on = self.vars["SPC_AUTO_PENDING"].get().strip() not in ("0", "false", "False", "no", "NO", "off", "OFF")
+            if self._pending_entry is not None:
+                self._pending_entry.configure(state=("disabled" if auto_on else "normal"))
+
+        self._auto_pending_cb = ttk.Checkbutton(
+            parent,
+            text="自动识别（扫描今天的四位数文件夹）",
+            command=_toggle_pending_state,
+            variable=self.vars["SPC_AUTO_PENDING"],
+            onvalue="1",
+            offvalue="0",
+        )
+        self._auto_pending_cb.grid(row=2, column=1, sticky="w", padx=8, pady=6)
+
+        # 手动输入框（SPC_PENDING）
+        ttk.Label(parent, text="手动输入 pending", width=22).grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        self._pending_entry = ttk.Entry(parent, textvariable=self.vars["SPC_PENDING"])
+        self._pending_entry.grid(row=3, column=1, sticky="we", padx=8, pady=6)
+        ttk.Label(parent, text="例：1172,1173 或 C:\\...\\1172", foreground="#666").grid(
+            row=4, column=1, sticky="w", padx=8, pady=(0, 6)
+        )
+        parent.columnconfigure(1, weight=1)
+
+        ttk.Label(parent, text="导入步骤", width=22).grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        ttk.Checkbutton(
+            parent,
+            text="执行导入（新建任务/选择文件夹/RTK/确认）",
+            variable=self.vars["SPC_DO_IMPORT"],
+            onvalue="1",
+            offvalue="0",
+        ).grid(row=5, column=1, sticky="w", padx=8, pady=6)
+
+        _toggle_pending_state()
 
         btns = ttk.Frame(parent)
-        btns.grid(row=3, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10))
+        btns.grid(row=6, column=0, columnspan=3, sticky="we", padx=8, pady=(14, 10))
         ttk.Button(btns, text="运行 auto.py（自动操作）", command=self.run_auto).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="停止 auto.py", command=lambda: self.stop_script("auto.py")).pack(side="left", padx=(8, 0))
 

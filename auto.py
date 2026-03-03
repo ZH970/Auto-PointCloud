@@ -612,23 +612,26 @@ def solve(window, app: Application, folder_name: str, button=None):
             time.sleep(0.3)
 
 
-def run_import_for_folder(app: Application, folders_list:list) -> None:
+def run_import_for_folder(app: Application, folders_list:list, do_import:bool=True) -> None:
     find = False #是否找到任务行
     window = ensure_main_window(app)
     click_button(window, title="主页", button_type="TabItem")
-    # for folder in folders_list:
-    #     logging.info("开始导入: %s", folder)
-    #     click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
-    #     #time.sleep(WAIT_ACTION)
-    #     click_button(window, "选择文件夹", "Button", 2)
-    #     dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
-    #     choose_folder(dialog, folder.name, folder.parent.as_posix())
-    #     click_button(window,title="RTK校准")
-    #     click_button(window,title="确认")
-    #     time.sleep(3.0)
-    #     window = ensure_main_window(app)
-    #     logging.info("导入完成: %s", folder)
-    #     time.sleep(0.2)
+    # ========== 可选步骤：导入（新建任务/选择文件夹/RTK/确认）==========
+    if do_import:
+        for folder in folders_list:
+            logging.info("Start import: %s", folder)
+            click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
+            click_button(window, "选择文件夹", "Button", 2)
+            dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
+            choose_folder(dialog, folder.name, folder.parent.as_posix())
+            click_button(window, title=RTK_BUTTON_TEXT)
+            click_button(window, title=CONFIRM_BUTTON_TEXT)
+            time.sleep(3.0)
+            window = ensure_main_window(app)
+            logging.info("Finish import: %s", folder)
+            time.sleep(0.2)
+    else:
+        logging.info("Skip import")
 
     # time.sleep(1.0)
     logging.info("Finished importing all folders, start processing...")
@@ -694,25 +697,65 @@ def _apply_env_overrides():
     POINTCLOUD_ROOT = Path(ROOT_STR)
     PROCESSED_MARK_DIR = POINTCLOUD_ROOT / "after"
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name, "")
+    if v == "":
+        return default
+    return v.strip().lower() not in ("0", "false", "no", "off")
+
+def _parse_pending_list(pending_env: str, root: Path) -> list[Path]:
+    """
+    支持：
+    - "1172,1173"
+    - "C:\\path\\to\\1172,1173"
+    - 多行输入
+    """
+    if not pending_env:
+        return []
+    tokens = re.split(r"[\s,;]+", pending_env.strip())
+    out: list[Path] = []
+    for t in tokens:
+        if not t:
+            continue
+        p = Path(t)
+        if p.is_absolute():
+            out.append(p)
+        else:
+            # 相对值：若是四位数，按 root/1172；否则也按 root/原样
+            out.append(root / t)
+    return out
+
 def main() -> None:
     _apply_env_overrides()
     setup_logging()
     logging.info("Start...")
+
+    auto_pending = _env_bool("SPC_AUTO_PENDING", True)
+    pending_env = os.getenv("SPC_PENDING", "").strip()
+
+    if pending_env:
+        pending = _parse_pending_list(pending_env, POINTCLOUD_ROOT)
+    elif auto_pending:
+        pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
+    else:
+        pending = []
+
     # 一次只能输入10个文件夹，防止软件无法判断是结算没完成还是在下一页
     #pending = list(list_pending_folders(POINTCLOUD_ROOT, PROCESSED_MARK_DIR))
-    pending = []
+    # pending = []
     # for test only    
     #pending.append(Path(ROOT_STR + "\\" + "1169"))
     # pending.append(Path(ROOT_STR + "\\" + "1170"))
     # pending.append(Path(ROOT_STR + "\\" + "1173"))
-    pending.append(Path(ROOT_STR + "\\" + "1172"))
+    # pending.append(Path(ROOT_STR + "\\" + "1172"))
     
-    # if not pending:
-    #     logging.info("没有待导入的四位数点云文件夹。")
-    #     return
+    if not pending:
+        logging.info("No pending folder found")
+        return
+    do_import = _env_bool("SPC_DO_IMPORT", True)
     app = start_or_connect_app()
     try:
-        run_import_for_folder(app, pending)
+        run_import_for_folder(app, pending, do_import=do_import)
         time.sleep(2)
     except Exception as exc:
         logging.exception("Process %s Error: %s", pending, exc)
