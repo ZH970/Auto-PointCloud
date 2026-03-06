@@ -542,7 +542,7 @@ def solve(window, app: Application, folder_name: str, button=None):
     logging.debug("Start detect target...")
     point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
     pcp, pcp_loc = point_cloud_image
-    center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
+    center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["botto  m"] + pcp_loc["top"])* (13/20)))
     # scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
     # detected_img, bbox = detect_target(mode=3, visualize=False) #mode 修改图片获取方式
 
@@ -639,7 +639,7 @@ def run_import_for_folder(app: Application, folders_list:list, do_import:bool=Tr
 
     for folder in folders_list:
         #阻塞直到导入完成
-        #c = click_view_for_task(window, folder.name)
+        c = click_view_for_task(window, folder.name)
         ret = 0
         logging.error("Cannot find addr connvert button, retrying...")
         click_button(window, "1", button_type="Text", timeout=2)
