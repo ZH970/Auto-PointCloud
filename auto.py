@@ -365,6 +365,60 @@ def set_clipboard_text(text: str, timeout_sec: int = 3) -> None:
         timeout=timeout_sec,
     )
 
+def _try_save_clipboard_image_windows(save_path: str, timeout_sec: int = 5) -> bool:
+    """
+    用 Windows 官方剪贴板（System.Windows.Forms.Clipboard）保存图片到文件。
+    需要 powershell -STA（剪贴板 API 要 STA 线程）。
+    """
+    if not save_path:
+        return False
+
+    try:
+        from PIL.Image import Image 
+        # 3. 无限循环，阻塞等待剪贴板出现有效图片
+        while True:
+            # 从剪贴板获取内容
+            clipboard_content = ImageGrab.grabclipboard()
+            
+            # 4. 判断是否为有效图片
+            if clipboard_content is not None and isinstance(clipboard_content, Image):
+                            
+                # PowerShell 单引号转义
+                ps_path = save_path.replace("'", "''")
+
+                ps = rf"""
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            try {{
+                $img = [System.Windows.Forms.Clipboard]::GetImage()
+                if ($null -ne $img) {{
+                    $img.Save('{ps_path}', [System.Drawing.Imaging.ImageFormat]::Png)
+                    '1'
+                }} else {{
+                    '0'
+                }}
+            }} catch {{
+                '0'
+            }}
+            """
+
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-STA", "-Command", ps],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+                return r.stdout.strip().endswith("1")
+            else:
+                # 无有效图片，延迟后继续检测
+                print(f"当前剪贴板无有效图片，{timeout_sec} 秒后重新检测...", end="\r")
+                time.sleep(timeout_sec)
+    except KeyboardInterrupt:
+        # 捕获 Ctrl+C，实现手动退出
+        print("\n\n程序被用户手动终止，退出监听")
+    except Exception as e:
+        print(f"\n程序运行出错：{str(e)}")
+
 def save_clipboard_img_to_dir(folder_name: str, checktime: int=2) -> None:
     """
     阻塞等待剪贴板出现有效图片，然后保存到 PROCESSED_MARK_DIR/img 目录下，命名为 folder_name
@@ -467,7 +521,54 @@ def solve(window, app: Application, folder_name: str, button=None):
     #     "boardB_394_395": [target_ids[2],target_ids[3]],
     # }
 
-    # # 坐标转换
+    logging.debug("Start detect target...")
+    while True:
+        try:
+            click_button(window,title="俯视",button_type="Text")
+            break
+        except timings.TimeoutError:
+            #button.click_input()
+            time.sleep(1)
+            return 0
+    
+    point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
+    pcp, pcp_loc = point_cloud_image
+    center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["bottom"] + pcp_loc["top"])* (13/20)))
+
+    #自动识别标靶
+    # scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
+    # detected_img, bbox = detect_target(mode=3, visualize=False) #mode 修改图片获取方式
+
+    # if bbox is not None:
+    #     # 截取标靶四边形区域
+    #     img1 = warp_by_bbox(detected_img, bbox, (800, 800))
+    #     img_match = match_target_by_template("image.png", img1, mode=1, visualize=False)
+    #     for i in img_match:
+    #         if i is None:
+    #             logging.error("failed to match target position, please select point manually")
+    #             print("标靶位置检测失败，请手动确认截图选点")
+    #             img1 = detected_img
+    #             # 将剪切板的图片保存为文件
+    #             #save_clipboard_img_to_dir(folder_name)
+    #             _try_save_clipboard_image_windows(rf"{PROCESSED_MARK_DIR}\img\{folder_name}.png", timeout_sec=5)
+    #             break
+    #     # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
+    #     img1_save_path = PROCESSED_MARK_DIR / f"img\\{folder_name}.png"
+    #     try:
+    #         img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
+    #     except (AttributeError, UnboundLocalError):
+    #         # img1 是 ndarray
+    #         pil_save_cv(img1, img1_save_path)
+
+    # else:
+    #     logging.error("未检测到标靶位置，无法自动选点，请手动选点")
+    #     print("未检测到标靶位置，无法自动选点，请手动确认截图选点")
+        # 将剪切板的图片保存为文件
+        #save_clipboard_img_to_dir(folder_name)
+    _try_save_clipboard_image_windows(rf"{PROCESSED_MARK_DIR}\img\{folder_name}.png", timeout_sec=5)
+    logging.info("Saving clipboard image to file for manual point selection...")
+
+    # 坐标转换
     while True:
         try:
             click_button(window, title="坐标转换", button_type="Text", timeout=5)
@@ -539,38 +640,7 @@ def solve(window, app: Application, folder_name: str, button=None):
     # board_center_bbox_from_two_markers(image, corners_dict, (392, 393), L, sep)
     # newcenter2, bbox2 = solve_board_center_bbox_from_two_markers(image, corners_dict, (394, 395), L, sep)
     # time.sleep(0.5)
-    logging.debug("Start detect target...")
-    point_cloud_image = click_button(window,title="窗口Image2",click=False,stable=False)
-    pcp, pcp_loc = point_cloud_image
-    center = (int((pcp_loc["left"] + pcp_loc["right"])*(11/20)), int((pcp_loc["botto  m"] + pcp_loc["top"])* (13/20)))
-    # scroll_delay(center=center, wheel_dist= 10, mouse=mouse)
-    # detected_img, bbox = detect_target(mode=3, visualize=False) #mode 修改图片获取方式
 
-    # if bbox is not None:
-    #     # 截取标靶四边形区域
-    #     img1 = warp_by_bbox(detected_img, bbox, (800, 800))
-    #     img_match = match_target_by_template("image.png", img1, mode=1, visualize=False)
-    #     for i in img_match:
-    #         if i is None:
-    #             logging.error("failed to match target position, please select point manually")
-    #             print("标靶位置检测失败，请手动确认截图选点")
-    #             img1 = detected_img
-    #             # 将剪切板的图片保存为文件
-    #             save_clipboard_img_to_dir(folder_name)
-    #             break
-    #     # img1 = ImageGrab.grab(bbox=(bbox1[1], bbox1[0], bbox1[3], bbox1[2]))
-    #     img1_save_path = PROCESSED_MARK_DIR / f"img\\{folder_name}.png"
-    #     try:
-    #         img1.save(f"{ROOT_STR}\\after\\img\\{folder_name}.png")
-    #     except (AttributeError, UnboundLocalError):
-    #         # img1 是 ndarray
-    #         pil_save_cv(img1, img1_save_path)
-
-    # else:
-    # logging.error("未检测到标靶位置，无法自动选点，请手动选点")
-    # print("未检测到标靶位置，无法自动选点，请手动确认截图选点")
-    # 将剪切板的图片保存为文件
-    save_clipboard_img_to_dir(folder_name)
     # 手动选点
     # 系统弹窗提醒可以开始选点
     notify_start_select_points(timeout_ms=1000, title="选点提示", hwnd=window.handle)
@@ -760,7 +830,6 @@ def main() -> None:
     except Exception as exc:
         logging.exception("Process %s Error: %s", pending, exc)
     logging.info("All done...")
-
 
 
 if __name__ == "__main__":
