@@ -5,6 +5,7 @@ import shutil
 import ctypes
 import string
 import subprocess
+import json
 from datetime import datetime, timedelta
 # 尝试导入 tkinter，用于弹窗重命名；若不可用则在运行时跳过弹窗
 try:
@@ -78,6 +79,33 @@ def get_folder_size_bytes(path):
                 pass
     return total
 
+def get_new_basename_from_user_config(folder_path):
+    """
+    从 <folder_path>/info/user_config.json 读取 SN，返回 SN 后4位数字作为新目录名。
+    失败返回 None。
+    """
+    try:
+        cfg_path = os.path.join(folder_path, "info", "user_config.json")
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        sn = str(data.get("SN", "")).strip()
+        if not sn:
+            return None
+
+        # 优先取 SN 末尾连续4位数字
+        m = re.search(r"(\d{4})$", sn)
+        if m:
+            return m.group(1)
+
+        # 兜底：取 SN 中最后出现的4位数字
+        all4 = re.findall(r"\d{4}", sn)
+        return all4[-1] if all4 else None
+    except Exception:
+        return None
+    
 def ensure_unique_dst(dst_parent, name):
     candidate = os.path.join(dst_parent, name)
     if not os.path.exists(candidate):
@@ -180,7 +208,7 @@ def prompt_for_rename(current_name):
             root.attributes("-topmost", True)
         except Exception:
             pass
-        res = simpledialog.askstring("重命名", f"当前目录名: {current_name}\n输入新的文件夹名（留空并确认表示不重命名）：", parent=root)
+        res = simpledialog.askstring("获取sn失败，请手动重命名", f"当前目录名: {current_name}\n输入新的文件夹名（留空并确认表示不重命名）：", parent=root)
         root.destroy()
         if res is None:
             return None
@@ -261,15 +289,22 @@ def copy_folder_explorer_like(src, dst):
             print("shutil.copytree 回退也失败，错误:", e)
         return False
     
-def parse_args():
-    # 解析源盘（通过卷标）
+def resolve_src_from_label():
+    """根据卷标解析源目录，找不到返回 None（不退出程序）。"""
     resolved_root = find_drive_root_by_label(SRC_LABEL)
-    if resolved_root:
-        src = os.path.join(resolved_root, SRC_SUBPATH) if SRC_SUBPATH else resolved_root
-    else:
-        print(f"未在系统中找到标识为 '{SRC_LABEL}' 的盘。请确认设备已连接，或修改脚本中的 SRC_LABEL。")
-        sys.exit(1)
-    return src
+    if not resolved_root:
+        return None
+    return os.path.join(resolved_root, SRC_SUBPATH) if SRC_SUBPATH else resolved_root
+
+# def parse_args():
+#     # 解析源盘（通过卷标）
+#     resolved_root = find_drive_root_by_label(SRC_LABEL)
+#     if resolved_root:
+#         src = os.path.join(resolved_root, SRC_SUBPATH) if SRC_SUBPATH else resolved_root
+#     else:
+#         print(f"未在系统中找到标识为 '{SRC_LABEL}' 的盘。请确认设备已连接，或修改脚本中的 SRC_LABEL。")
+#         sys.exit(1)
+#     return src
 
 def validate_paths(src, dst):
     if not os.path.isdir(src):
@@ -348,13 +383,8 @@ def prompt_for_mod_date_filter(default_enabled: bool, default_date: str):
     return True, date_str
 
 # 替换后的 main，使用脚本内常量且只检查一级子目录
-def main():
-    # 需要管理员权限运行
-    print("--------------------------------请以管理员权限运行--------------------------------------")
+def single(src, dst):
 
-    src = parse_args()
-    
-    dst = DST
     min_b = int(MIN_MB * 1024 * 1024)
     max_b = int(MAX_MB * 1024 * 1024)
 
@@ -444,8 +474,11 @@ def main():
                     if not ok:
                         raise Exception("复制失败（robocopy/shutil 均失败）")
                     copy_done = True
-                    # 复制成功后弹窗询问是否重命名；空输入或取消则不重命名
-                    new_basename = prompt_for_rename(relname)
+
+                    new_basename = get_new_basename_from_user_config(target)
+                    if not new_basename:
+                        # 获取sn失败后弹窗询问是否重命名；空输入或取消则不重命名
+                        new_basename = prompt_for_rename(relname)
                     if new_basename:
                         new_target = ensure_unique_dst(dst, new_basename)
                         try:
@@ -465,9 +498,7 @@ def main():
 
             # 如果实际完成了复制（非 DRY_RUN 且复制成功），在目标下创建 after/<同名>- 目录
             if not DRY_RUN and copy_done and final_basename:
-                after_parent = os.path.join(dst, "after")
-                after_csv_dir = os.path.join(after_parent, "csv")
-                after_csv_dir = os.path.join(after_csv_dir, f"{final_basename}-")
+                after_csv_dir = os.path.join(dst, "after", "csv", f"{final_basename}-")
                 try:
                     os.makedirs(after_csv_dir, exist_ok=True)
                     if VERBOSE:
@@ -484,6 +515,47 @@ def main():
     if not matched_any:
         print("未找到满足条件的文件夹。")
 
+def main_loop(poll_sec=1.0):
+    """连续执行：插卡->处理一轮->等拔卡->下一轮。"""
+    print("--------------------------------请以管理员权限运行--------------------------------------")
+    print("连续模式已启动：插入 TF 卡后自动处理；拔卡后等待下一张。按 Ctrl+C 退出。")
+
+    _apply_env_overrides()
+    dst = DST
+
+    waiting_remove = False
+    current_root = None
+
+    while True:
+        try:
+            root = resolve_src_from_label()
+
+            if not waiting_remove:
+                if root:
+                    current_root = root
+                    src = os.path.join(root, SRC_SUBPATH) if SRC_SUBPATH else root
+                    print(f"\n检测到设备: {root}，开始执行一轮任务...")
+                    single(src, dst)
+                    print("本轮完成，请拔出当前 TF 卡。")
+                    waiting_remove = True
+                else:
+                    pass
+            else:
+                # 等待当前卡被拔出
+                if (not root) or (current_root and root != current_root):
+                    print("检测到已拔卡，进入下一轮等待插卡。")
+                    waiting_remove = False
+                    current_root = None
+
+        except KeyboardInterrupt:
+            print("\n已退出连续模式。")
+            break
+        except Exception as e:
+            print(f"循环异常: {e}")
+
+        import time
+        time.sleep(poll_sec)
+
 if __name__ == "__main__":
-    main()
+    main_loop()
 

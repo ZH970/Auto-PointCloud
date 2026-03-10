@@ -116,7 +116,7 @@ class App(tk.Tk):
         self._row(parent, 4, "MAX_MB", "SPC_MAX_MB")
         self._row(parent, 5, "REQUIRED_MOD_TIME(0/1/2)", "SPC_REQUIRED_MOD_TIME")
         self._row(parent, 6, "REQUIRED_MOD_DATE(YYYY-MM-DD)", "SPC_REQUIRED_MOD_DATE")
-        self._row(parent, 7, "DRY_RUN(0/1)", "SPC_DRY_RUN")
+        self._row(parent, 7, "NoCopyFolder(0/1)", "SPC_DRY_RUN")
         self._row(parent, 8, "VERBOSE(0/1)", "SPC_VERBOSE")
 
         btns = ttk.Frame(parent)
@@ -230,16 +230,22 @@ class App(tk.Tk):
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                text=False,  # 关键：改为字节流，避免 subprocess 内部固定解码报错
             )
             with self._proc_lock:
                 self._procs[script] = p
                 
             assert p.stdout is not None
-            for line in p.stdout:
-                self._log(line.rstrip("\n"))
+            for raw in iter(p.stdout.readline, b""):
+                if not raw:
+                    break
+                try:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                except UnicodeDecodeError:
+                    # Windows 常见中文代码页兜底
+                    line = raw.decode("gb18030", errors="replace").rstrip("\r\n")
+                self._log(line)
+
             rc = p.wait()
             self._log(f"[DONE] {script} exit={rc}")
         except Exception as e:
