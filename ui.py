@@ -82,6 +82,7 @@ class App(tk.Tk):
         bottom = ttk.Frame(self)
         bottom.pack(fill="both", expand=False)
         ttk.Label(bottom, text="输出日志：").pack(anchor="w", padx=8, pady=(6, 0))
+        
 
         self.txt = tk.Text(bottom, height=14, wrap="word")
         self.txt.pack(fill="both", expand=True, padx=8, pady=8)
@@ -93,7 +94,7 @@ class App(tk.Tk):
         top.pack(fill="x", side="bottom")
         ttk.Button(top, text="保存配置", command=self.save_cfg).pack(side="right", padx=8, pady=6)
 
-    def _row(self, parent, r, label, key, browse: bool = False, kind: str = "dir"):
+    def _row(self, parent, r, label, key, browse: bool = False, kind: str = "dir", multiple: bool = False):
         ttk.Label(parent, text=label, width=22).grid(row=r, column=0, sticky="w", padx=8, pady=6)
         ent = ttk.Entry(parent, textvariable=self.vars[key])
         ent.grid(row=r, column=1, sticky="we", padx=8, pady=6)
@@ -102,7 +103,7 @@ class App(tk.Tk):
                 if kind == "dir":
                     p = filedialog.askdirectory()
                 else:
-                    p = filedialog.askopenfilename()
+                    p = filedialog.askopenfilename(multiple=multiple)
                 if p:
                     self.vars[key].set(p)
             ttk.Button(parent, text="选择", command=_pick).grid(row=r, column=2, padx=8, pady=6)
@@ -135,6 +136,8 @@ class App(tk.Tk):
             auto_on = self.vars["SPC_AUTO_PENDING"].get().strip() not in ("0", "false", "False", "no", "NO", "off", "OFF")
             if self._pending_entry is not None:
                 self._pending_entry.configure(state=("disabled" if auto_on else "normal"))
+            if auto_on:
+                self.vars["SPC_PENDING"].set("")  # 自动识别时清空手动输入
 
         self._auto_pending_cb = ttk.Checkbutton(
             parent,
@@ -172,7 +175,7 @@ class App(tk.Tk):
         ttk.Button(btns, text="停止 auto.py", command=lambda: self.stop_script("auto.py")).pack(side="left", padx=(8, 0))
 
     def _build_excel_tab(self, parent):
-        self._row(parent, 0, "points.csv 路径", "SPC_CSV", browse=True, kind="file")
+        self._row(parent, 0, "points.csv 路径", "SPC_CSV", browse=True, kind="file",multiple=True)
         self._row(parent, 1, "Excel 工作簿路径", "SPC_WORKBOOK", browse=True, kind="file")
         self._row(parent, 2, "Sheet 名称", "SPC_SHEET")
         self._row(parent, 3, "另存为(可空)", "SPC_SAVE_AS", browse=True, kind="file")
@@ -213,14 +216,18 @@ class App(tk.Tk):
             env[k] = v.get()
 
         # 强制子进程 stdout/stderr 用 utf-8
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
+        # env["PYTHONUTF8"] = "1"
+        # env["PYTHONIOENCODING"] = "utf-8"
+        env.pop("PYTHONUTF8", None)
+        env.pop("PYTHONIOENCODING", None)
+        # 让子进程实时刷新输出，UI 才能及时看到日志
+        env["PYTHONUNBUFFERED"] = "1"
         return env
 
     def _run_script(self, script: str, args: list[str]):
         env = self._build_env()
         py = sys.executable
-        cmd = [py, str(WORKDIR / script)] + args
+        cmd = [py, "-u", str(WORKDIR / script)] + args
 
         self._log(f"\n$ {' '.join(cmd)}\n")
         try:

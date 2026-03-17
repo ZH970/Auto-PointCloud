@@ -208,6 +208,12 @@ def wait_dialog(app: Application, title_re: str, timeout: int):
 def escape_send_keys(text: str) -> str:
     return text.replace("(", "{(}").replace(")", "{)}").replace(" ", "{SPACE}")
 
+def _norm_win_path(p: str) -> str:
+    s = str(p).strip()
+    if not s:
+        return s
+    return os.path.normpath(s).replace("/", "\\")
+
 def scroll_delay(center: tuple[int, int], wheel_dist: int=1, mouse: object=pywinauto.mouse):
     """封装pywinauto.mouse滚轮滚动，增加延时,防止多次快速滚动请求导致软件忽略后续滚动动作，wheel_dist 正数向上滚动，负数向下滚动"""
     for i in range(abs(wheel_dist)):
@@ -326,7 +332,10 @@ def choose_folder(dialog, folder_name: str, parent: str=ROOT_STR) -> None:
             click_button(dialog,title="向上一级区段工具栏", button_type="ToolBar")
     click_button(dialog,title="^(地址|address|add):.*", button_type="ToolBar", use_regex=True, timeout=WAIT_MAIN_WINDOW)
     #click_button(dialog, title="上一个位置", button_type="Button", offset=(-2, 0))
-    send_keys(escape_send_keys(parent) + "{\}" + folder_name + "{ENTER}")
+    parent_norm = _norm_win_path(parent)
+    folder_norm = _norm_win_path(folder_name).strip("\\")
+    full_path = parent_norm if not folder_norm else f"{parent_norm}\\{folder_norm}"
+    send_keys(escape_send_keys(full_path) + "{ENTER}")
     try:
         click_button(dialog,title="选择文件夹", button_type="Button")
     except pywinauto.findwindows.ElementAmbiguousError:
@@ -524,9 +533,9 @@ def solve(window, app: Application, folder_name: str, button=None):
     logging.debug("Start detect target...")
     while True:
         try:
-            click_button(window,title="俯视",button_type="Text")
+            click_button(window,title="俯视",button_type="Text", timeout=5)
             break
-        except timings.TimeoutError:
+        except timings.TimeoutError or ElementNotFoundError:
             #button.click_input()
             time.sleep(1)
             return 0
@@ -592,7 +601,7 @@ def solve(window, app: Application, folder_name: str, button=None):
     check_dir = Path(PROCESSED_MARK_DIR) / "csv" / (folder_name + "-")
     if not check_dir.exists():
         check_dir.mkdir(parents=True, exist_ok=True)
-    choose_folder(dialog,"after"+"{\}"+ "csv" + "{\}" + folder_name + "{-}")
+    choose_folder(dialog,f"after\\csv\\{folder_name}-", ROOT_STR)
     click_button(window, title="确认", button_type="Button")
 
     # 写入剪切板对图片进行隔离
@@ -693,7 +702,7 @@ def run_import_for_folder(app: Application, folders_list:list, do_import:bool=Tr
             click_button(window, NEW_TASK_BUTTON_TEXT, "Text", 2)
             click_button(window, "选择文件夹", "Button", 2)
             dialog = wait_dialog(app, SELECT_DIALOG_TITLE_RE, WAIT_DIALOG)
-            choose_folder(dialog, folder.name, folder.parent.as_posix())
+            choose_folder(dialog, folder.name, str(folder.parent))
             click_button(window, title=RTK_BUTTON_TEXT)
             click_button(window, title=CONFIRM_BUTTON_TEXT)
             time.sleep(3.0)
@@ -709,9 +718,9 @@ def run_import_for_folder(app: Application, folders_list:list, do_import:bool=Tr
 
     for folder in folders_list:
         #阻塞直到导入完成
-        c = click_view_for_task(window, folder.name)
+        #c = click_view_for_task(window, folder.name)
         ret = 0
-        logging.error("Cannot find addr connvert button, retrying...")
+        #logging.error("Cannot find addr connvert button, retrying...")
         click_button(window, "1", button_type="Text", timeout=2)
         #c = click_view_for_task(window, folder.name)
         for i in range(8): #最多翻8页
@@ -732,6 +741,13 @@ def run_import_for_folder(app: Application, folders_list:list, do_import:bool=Tr
         if ret == -1:
             logging.error("Coordinate conversion failed, skipping this folder %s retry", folder.stem)
             continue
+        while ret == 0:
+            c = click_view_for_task(window, folder.name)
+            if c is not None:
+                c.click_input()
+            time.sleep(0.5)
+            logging.info("Retrying solve for folder %s ...", folder.stem)
+            ret = solve(window, app, folder.stem)
         time.sleep(1)
         for i in range(3):
             click_button(window, title="主页", button_type="TabItem", timeout=2)
