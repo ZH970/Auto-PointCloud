@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PointCloud 工具箱｜项目使用说明书</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #121a33;
+      --text: #eaf0ff;
+      --muted: #b7c2e6;
+      --line: #2a3767;
+      --acc: #6ea8fe;
+      --ok: #7ee787;
+      --warn: #ffcd66;
+      --err: #ff7b72;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      background: linear-gradient(180deg, #0a0f1f 0%, #0f1630 100%);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1, h2, h3 { line-height: 1.35; margin: 0 0 12px; }
+    h1 { font-size: 34px; margin-bottom: 10px; }
+    h2 {
+      margin-top: 30px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+      font-size: 24px;
+      color: #dbe7ff;
+    }
+    h3 { margin-top: 18px; font-size: 18px; color: #c8d9ff; }
+    p, li { color: var(--muted); }
+    a { color: var(--acc); text-decoration: none; }
+    .hero {
+      background: radial-gradient(1200px 300px at 20% -20%, #28428d55 0%, transparent 60%), var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .card {
+      background: #101937;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      color: #d8e5ff;
+      margin-right: 6px;
+    }
+    code, pre {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+    pre {
+      background: #0b1330;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      color: #dfe8ff;
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+    .toc a { display: inline-block; margin: 2px 10px 2px 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      background: #0f1736;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+      color: var(--muted);
+    }
+    th { color: #dbe7ff; background: #111c43; }
+    .footer {
+      margin-top: 30px;
+      color: #9fb0e0;
+      font-size: 13px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>PointCloud 工具箱｜项目使用说明书</h1>
+      <p>版本：2026-03-23｜适用平台：Windows</p>
+      <p>
+        本项目将点云作业流程整合为三段：
+        <span class="tag">main.py：TF卡导入</span>
+        <span class="tag">auto.py：Lidar ME自动化</span>
+        <span class="tag">points2SLAM_Output.py：CSV写入Excel</span>
+      </p>
+      <p class="warn">注意：Lidar ME 通常需要管理员权限运行，并确保已插入授权密钥/加密狗。</p>
+    </section>
+
+    <section class="toc">
+      <h2>目录</h2>
+      <a href="#overview">1. 项目概览</a>
+      <a href="#install">2. 环境安装</a>
+      <a href="#run">3. 快速开始</a>
+      <a href="#ui">4. UI三页签说明</a>
+      <a href="#workflow">5. 推荐流程</a>
+      <a href="#troubleshoot">6. 常见问题排查</a>
+      <a href="#appendix">7. 附录（关键路径与参数）</a>
+    </section>
+
+    <section id="overview">
+      <h2>1. 项目概览</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>1) main.py（导入）</h3>
+          <ul>
+            <li>按卷标识别 TF/SD 卡（如 LidarME）</li>
+            <li>筛选时间戳目录 + 大小范围 + 日期规则</li>
+            <li>复制到本地并执行重命名策略</li>
+            <li>创建 after/csv 目录结构供后续步骤使用</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>2) auto.py（自动化处理）</h3>
+          <ul>
+            <li>连接/启动 Lidar ME，执行 UI 操作</li>
+            <li>可选“执行导入步骤”或“仅后处理”</li>
+            <li>支持自动识别 pending 或手动指定 pending</li>
+            <li>包含截图、目标识别、人工选点确认、导出</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>3) points2SLAM_Output.py（写表）</h3>
+          <ul>
+            <li>读取 points.csv</li>
+            <li>写入目标 Excel 指定 Sheet</li>
+            <li>支持保留图片列、另存为等参数</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>2. 环境安装</h2>
+      <h3>2.1 安装依赖</h3>
+      <pre>cd /d C:\pyprojcet\search-pointcloud-folder
+pip install -r requirements.txt</pre>
+
+      <h3>2.2 建议运行方式</h3>
+      <ul>
+        <li>建议使用虚拟环境（conda/venv）</li>
+        <li>建议以管理员方式打开终端/IDE</li>
+        <li>先手动打开一次 Lidar ME，确认历史任务可见</li>
+      </ul>
+    </section>
+
+    <section id="run">
+      <h2>3. 快速开始</h2>
+      <pre>cd /d C:\pyprojcet\search-pointcloud-folder
+python ui.py</pre>
+      <p>打开 UI 后，依次执行：</p>
+      <ol>
+        <li>页签 1：运行 main.py（导入点云）</li>
+        <li>页签 2：运行 auto.py（自动化处理）</li>
+        <li>页签 3：运行 points2SLAM_Output.py（写入 Excel）</li>
+      </ol>
+    </section>
+
+    <section id="ui">
+      <h2>4. UI 三页签说明</h2>
+
+      <h3>4.1 页签一：TF卡导入（main.py）</h3>
+      <table>
+        <thead><tr><th>字段</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td>SRC_LABEL</td><td>设备卷标名（例：LidarME）</td></tr>
+          <tr><td>SRC_SUBPATH</td><td>源盘内子路径（空=根目录）</td></tr>
+          <tr><td>DST</td><td>本地点云根目录</td></tr>
+          <tr><td>MIN_MB / MAX_MB</td><td>按文件夹大小过滤</td></tr>
+          <tr><td>REQUIRED_MOD_TIME</td><td>0不筛日期 / 1指定日期 / 2最近7天</td></tr>
+          <tr><td>REQUIRED_MOD_DATE</td><td>日期模式=1时使用（YYYY-MM-DD）</td></tr>
+          <tr><td>NoCopyFolder</td><td>0实际复制 / 1仅预览</td></tr>
+          <tr><td>VERBOSE</td><td>详细日志开关</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4.2 页签二：LidarME 自动化（auto.py）</h3>
+      <table>
+        <thead><tr><th>字段</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td>ROOT_STR</td><td>点云工作目录根路径</td></tr>
+          <tr><td>APP_EXE</td><td>Lidar ME 程序路径</td></tr>
+          <tr><td>自动识别 pending</td><td>开启后自动扫描今天修改的4位目录</td></tr>
+          <tr><td>手动输入 pending</td><td>可填 1172,1173 或绝对路径，分隔符支持逗号/空格/换行</td></tr>
+          <tr><td>执行导入步骤</td><td>开启：新建任务+选文件夹+RTK+确认；关闭：仅后续处理</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4.3 页签三：写入 Excel（points2SLAM_Output.py）</h3>
+      <table>
+        <thead><tr><th>字段</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td>points.csv 路径</td><td>支持单个或多个（按当前脚本参数组织）</td></tr>
+          <tr><td>Excel 工作簿路径</td><td>目标 xlsx 文件</td></tr>
+          <tr><td>Sheet 名称</td><td>写入工作表名（默认 SLAM扫描测试）</td></tr>
+          <tr><td>另存为</td><td>可空；空时按脚本默认策略处理</td></tr>
+          <tr><td>保留图片列</td><td>控制图片列处理策略（默认 1）</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4.4 通用按钮</h3>
+      <ul>
+        <li><strong>运行</strong>：启动对应脚本并传入 UI 配置（环境变量）</li>
+        <li><strong>停止</strong>：终止对应子进程（terminate，必要时 kill）</li>
+        <li><strong>保存配置</strong>：写入 <code>ui_config.json</code>，下次自动回填</li>
+      </ul>
+    </section>
+
+    <section id="workflow">
+      <h2>5. 推荐作业流程</h2>
+      <ol>
+        <li>插入 TF 卡，页签1运行 main.py 完成导入与目录命名。</li>
+        <li>页签2运行 auto.py：
+          <ul>
+            <li>新任务首次处理：勾选“执行导入步骤”</li>
+            <li>已导入任务复跑：取消“执行导入步骤”并手动指定 pending</li>
+          </ul>
+        </li>
+        <li>页签3运行 points2SLAM_Output.py，将 points.csv 写入 Excel。</li>
+      </ol>
+    </section>
+
+    <section id="troubleshoot">
+      <h2>6. 常见问题排查</h2>
+
+      <h3>6.1 UI 日志乱码 / 看不到中文</h3>
+      <ul>
+        <li>原因：Windows 子进程输出编码混合（UTF-8/GBK）。</li>
+        <li>建议：UI 采用字节流读取并 utf-8/gb18030 回退解码（已在 ui.py 中实现）。</li>
+      </ul>
+
+      <h3>6.2 Lidar ME 打开后没有历史任务</h3>
+      <ul>
+        <li>建议先手动启动 Lidar ME，确认任务数据库正常，再用自动化连接。</li>
+        <li>如自动启动目录不一致，可能导致加载到不同工作环境。</li>
+      </ul>
+
+      <h3>6.3 send_keys 路径输入报 Unknown code</h3>
+      <ul>
+        <li>常见原因：对路径做了重复转义（括号/反斜杠二次 escape）。</li>
+        <li>处理原则：路径先规范化，再只在 send_keys 前转义一次。</li>
+      </ul>
+
+      <h3>6.4 Excel 写入报 <code>no such item '/xl/worksheets/sheet1.xml'</code></h3>
+      <ul>
+        <li>原因：zip 路径前导斜杠不一致。</li>
+        <li>处理：对关系 Target 做归一化，去掉前导 <code>/</code> 再读取。</li>
+      </ul>
+
+      <h3>6.5 “查看”按钮灰色导致 auto 无法继续</h3>
+      <ul>
+        <li>原因：任务未完成导入，按钮尚不可点击。</li>
+        <li>建议：重试时每轮重新定位任务并重新点击打开，而不是只调用 solve。</li>
+      </ul>
+    </section>
+
+    <section id="appendix">
+      <h2>7. 附录（关键文件）</h2>
+      <ul>
+        <li><strong>UI入口</strong>：ui.py</li>
+        <li><strong>导入脚本</strong>：main.py</li>
+        <li><strong>自动化脚本</strong>：auto.py</li>
+        <li><strong>写表脚本</strong>：points2SLAM_Output.py</li>
+        <li><strong>视觉模块</strong>：scantest.py、freegrab.py</li>
+        <li><strong>键盘监听</strong>：keylistener.py</li>
+        <li><strong>配置文件</strong>：ui_config.json</li>
+      </ul>
+    </section>
+
+    <div class="footer">
+      文档生成时间：2026-03-23 ｜ 本文档用于项目内交付与培训，可直接浏览器打开。
+    </div>
+  </div>
+</body>
+</html>

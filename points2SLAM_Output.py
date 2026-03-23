@@ -108,14 +108,28 @@ def write_values(
         sheet.cell(row=row_index, column=15 + offset, value=value)
 
 def _zip_norm(p: str) -> str:
-    return str(PurePosixPath(p))
-
+    return str(PurePosixPath(str(p).replace("\\", "/")))
 
 def _xl_path_from_target(target: str) -> str:
-    # target 可能是 "../media/image1.png" / "media/image1.png"
-    p = PurePosixPath(target)
+    """
+    兼容：
+    - /xl/worksheets/sheet1.xml
+    - xl/worksheets/sheet1.xml
+    - worksheets/sheet1.xml
+    - ../drawings/drawing1.xml
+    - media/image1.png
+    """
+    raw = str(target or "").replace("\\", "/").strip().lstrip("/")  # 关键：去掉开头 /
+    p = PurePosixPath(raw)
+
+    # 已经是 xl/... 直接返回
+    if p.parts and p.parts[0] == "xl":
+        return _zip_norm(p)
+
+    # 去掉相对路径前缀 ../
     while p.parts and p.parts[0] == "..":
         p = PurePosixPath(*p.parts[1:])
+
     return _zip_norm(PurePosixPath("xl") / p)
 
 
@@ -142,7 +156,7 @@ def _get_sheet_xml_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
         if rel.get("Id") == rid:
             target = rel.get("Target")
             # 通常是 "worksheets/sheet1.xml"
-            return _zip_norm(PurePosixPath("xl") / target)
+            return _xl_path_from_target(target)
 
     raise ValueError(f"未找到工作表 {sheet_name} 的关系目标 (r:id={rid})")
 

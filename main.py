@@ -249,14 +249,22 @@ def copy_folder_explorer_like(src, dst):
             cmd = ["robocopy", src, dst, "/E", "/COPYALL", "/R:1", "/W:1", "/NFL", "/NDL"]
             if VERBOSE:
                 print("使用 robocopy 执行复制:", " ".join(cmd))
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, capture_output=True, text=False)
             rc = proc.returncode
             if VERBOSE:
                 print("robocopy 返回码:", rc)
                 if proc.stdout:
-                    print("robocopy stdout:", proc.stdout)
+                    try:
+                        out = proc.stdout.decode("utf-8")
+                    except UnicodeDecodeError:
+                        out = proc.stdout.decode("gb18030", errors="replace")
+                    print("robocopy stdout:", out)
                 if proc.stderr:
-                    print("robocopy stderr:", proc.stderr)
+                    try:
+                        err = proc.stderr.decode("utf-8")
+                    except UnicodeDecodeError:
+                        err = proc.stderr.decode("gb18030", errors="replace")
+                    print("robocopy stderr:", err)
             # robocopy 返回码位域：0-7 为成功/警告， >=8 为失败
             if rc < 8:
                 return True
